@@ -1,0 +1,88 @@
+# =============================================================================
+# 仓库范围：仅将根目录 LICENSE、amsrag/、amsrag-web/、本文件纳入版本控制；
+# 根目录下其余文件/文件夹（如 README、docs、examples、experiments 等）一律忽略。
+# 使用方式：在仓库根目录执行 git add . 时只会添加上述路径（仍受下方规则约束）。
+# =============================================================================
+/*
+!LICENSE
+!.gitignore
+!amsrag/
+!amsrag/**
+!amsrag-web/
+!amsrag-web/**
+
+# --- 大模型与本地权重（不上传）---
+amsrag/models/
+
+# --- Editor / OS ---
+.idea/
+.vscode/
+.kiro/
+.DS_Store
+Thumbs.db
+
+# --- Python ---
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+build/
+dist/
+*.egg-info/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+amsrag-web/backend/venv/
+
+# --- Environment / local config ---
+.env
+.env.*
+
+# --- Logs ---
+*.log
+logs/
+amsrag-web/logs/
+
+# --- Node / frontend build ---
+node_modules/
+amsrag-web/frontend/node_modules/
+amsrag-web/frontend/dist/
+
+# --- Local runtime artifacts ---
+tests/outputs_cache/
+*.diag.txt
+_tmp*/
+.tmp*/
+tmp/
+temp/
+
+# --- Web backend runtime data ---
+amsrag-web/backend/data/database/
+amsrag-web/backend/data/uploads/
+amsrag-web/backend/data/rag_workspaces/
+
+# --- Experiment datasets / generated artifacts（若将来单独跟踪 experiments 时可取消注释或移出白名单）---
+experiments/data/
+experiments/**/outputs/
+experiments/**/results/
+experiments/**/ablation_cache/
+experiments/**/data/processed/
+experiments/**/data/processed_backup_*/
+experiments/experiment1_complexity_classifier/outputs/
+experiments/experiment1_complexity_classifier/data/processed/
+
+# Keep placeholder files when present
+!**/.gitkeep

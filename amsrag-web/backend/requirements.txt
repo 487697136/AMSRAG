@@ -1,0 +1,41 @@
+# FastAPI 核心
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# 数据库
+sqlalchemy==2.0.25
+alembic==1.13.1
+
+# 认证和安全
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-dotenv==1.0.0
+cryptography==41.0.7
+
+# 数据验证
+pydantic==2.5.3
+pydantic-settings==2.1.0
+email-validator==2.1.0
+
+# HTTP 客户端
+httpx==0.26.0
+aiofiles==23.2.1
+neo4j>=5.0.0
+
+# 日志
+loguru==0.7.2
+
+# 工具
+python-dateutil==2.8.2
+
+# 文档解析（支持 PDF / DOCX / XLSX）
+pdfplumber>=0.10.0
+python-docx>=1.0.0
+openpyxl>=3.1.0
+
+# NumPy 版本限制（兼容 faiss）
+numpy<2.0.0
+
+# AMSRAG 核心依赖（从父目录导入）
+# 注意：amsrag 包通过 sys.path 或 PYTHONPATH 引入

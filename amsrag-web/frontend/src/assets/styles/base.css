@@ -1,0 +1,217 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: var(--line-height-body);
+  color: var(--text-1);
+  background: var(--page-bg);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(37, 99, 235, 0.16);
+}
+
+/* 滚动条样式在文件底部统一定义 */
+
+.surface-card {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: var(--shadow-soft);
+  background: var(--surface-card);
+}
+
+.page-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.status-badge--success {
+  background: var(--status-success-bg);
+  color: var(--status-success-text);
+}
+
+.status-badge--warning {
+  background: var(--status-warning-bg);
+  color: var(--status-warning-text);
+}
+
+.status-badge--default {
+  background: var(--status-default-bg);
+  color: var(--status-default-text);
+}
+
+.status-badge--info {
+  background: var(--status-info-bg);
+  color: var(--status-info-text);
+}
+
+.info-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.info-strip__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--surface-card);
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.info-strip__item strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.muted-divider {
+  border-top: 1px solid rgba(219, 227, 240, 0.82);
+}
+
+.n-button {
+  --n-height: 38px;
+  --n-border-radius: var(--control-radius);
+  --n-font-size: 14px;
+}
+
+.n-input,
+.n-base-selection {
+  --n-height: var(--control-height);
+  --n-border-radius: var(--control-radius);
+}
+
+.n-card {
+  --n-border-radius: var(--radius-md);
+}
+
+.n-data-table .n-data-table-th {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.n-data-table .n-data-table-td,
+.n-data-table .n-data-table-th {
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+
+.n-data-table .n-data-table-tr:hover td {
+  background: var(--surface-muted);
+}
+
+/* ─── 列表项入场动画 ─── */
+@keyframes slide-up-fade {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.list-animate > * {
+  animation: slide-up-fade 280ms ease both;
+}
+
+.list-animate > *:nth-child(1) { animation-delay: 0ms; }
+.list-animate > *:nth-child(2) { animation-delay: 40ms; }
+.list-animate > *:nth-child(3) { animation-delay: 80ms; }
+.list-animate > *:nth-child(4) { animation-delay: 120ms; }
+.list-animate > *:nth-child(5) { animation-delay: 160ms; }
+.list-animate > *:nth-child(6) { animation-delay: 200ms; }
+
+/* ─── 页面基础入场 ─── */
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.page-shell {
+  animation: page-in 260ms ease;
+}
+
+/* ─── 卡片优化 ─── */
+.surface-card {
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+/* ─── 滚动条 ─── */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--gray-300);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-400);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ─── Focus 样式统一 ─── */
+:focus-visible {
+  outline: 2px solid var(--brand-500);
+  outline-offset: 2px;
+}
+
+/* ─── 通用链接类 ─── */
+.text-link {
+  color: var(--brand-600);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.text-link:hover {
+  color: var(--brand-700);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
