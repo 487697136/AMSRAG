@@ -87,6 +87,8 @@ async def create_api_key(key_in: APIKeyCreate, current_user: User = Depends(get_
     if existing_key:
         existing_key.encrypted_key = encrypt_api_key(key_in.api_key)
         existing_key.description = key_in.description
+        if key_in.model_name is not None:
+            existing_key.model_name = key_in.model_name
         db.commit()
         db.refresh(existing_key)
         clear_rag_service_cache(current_user.id)
@@ -97,6 +99,7 @@ async def create_api_key(key_in: APIKeyCreate, current_user: User = Depends(get_
         provider=key_in.provider,
         encrypted_key=encrypt_api_key(key_in.api_key),
         description=key_in.description,
+        model_name=key_in.model_name,
     )
     db.add(api_key)
     db.commit()
@@ -118,6 +121,8 @@ async def update_api_key(key_id: int, key_in: APIKeyUpdate, current_user: User =
         api_key.encrypted_key = encrypt_api_key(key_in.api_key)
     if key_in.description is not None:
         api_key.description = key_in.description
+    if key_in.model_name is not None:
+        api_key.model_name = key_in.model_name
     db.commit()
     db.refresh(api_key)
     clear_rag_service_cache(current_user.id)

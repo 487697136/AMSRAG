@@ -41,13 +41,28 @@ def _get_owned_kb(db: Session, user_id: int, kb_id: int) -> KnowledgeBase | None
     )
 
 
-def _get_provider_keys(db: Session, user_id: int, llm_provider: str = "") -> Tuple[str, str, str, str]:
-    """Return (dashscope_key, siliconflow_key, llm_provider, llm_api_key)."""
+def _get_provider_keys(db: Session, user_id: int, llm_provider: str = "") -> Tuple[str, str, str, str, str]:
+    """Return (dashscope_key, siliconflow_key, llm_provider, llm_api_key, embedding_model)."""
     from app.models.api_key import APIKey
+    from app.schemas.api_key import DEFAULT_EMBEDDING_MODEL
     from app.utils.crypto import decrypt_api_key
 
     all_keys = db.query(APIKey).filter(APIKey.user_id == user_id).all()
-    key_map = {k.provider: decrypt_api_key(k.encrypted_key) for k in all_keys}
+    key_map: dict = {}
+    embedding_model = ""
+    for _k in all_keys:
+        try:
+            _dec = decrypt_api_key(_k.encrypted_key)
+            if _dec:
+                key_map[_k.provider] = _dec
+                if _k.provider == "siliconflow" and _k.model_name:
+                    embedding_model = _k.model_name
+        except Exception as _dec_err:
+            import warnings
+            warnings.warn(f"Failed to decrypt key for provider={_k.provider}: {_dec_err}")
+
+    if not embedding_model:
+        embedding_model = DEFAULT_EMBEDDING_MODEL.get("siliconflow", "BAAI/bge-m3")
 
     siliconflow_key = key_map.get("siliconflow", "")
     if not siliconflow_key:
@@ -81,7 +96,7 @@ def _get_provider_keys(db: Session, user_id: int, llm_provider: str = "") -> Tup
                 resolved_llm_key = key_map[fallback_provider]
                 break
 
-    return (dashscope_key, siliconflow_key, resolved_llm_provider, resolved_llm_key)
+    return (dashscope_key, siliconflow_key, resolved_llm_provider, resolved_llm_key, embedding_model)
 
 
 async def _prepare_query_service(
@@ -102,7 +117,7 @@ async def _prepare_query_service(
             detail="Knowledge base is not initialized yet. Please upload documents first, or switch to '仅模型回答' mode.",
         )
 
-    dashscope_key, siliconflow_key, llm_provider, llm_api_key = _get_provider_keys(
+    dashscope_key, siliconflow_key, llm_provider, llm_api_key, embedding_model = _get_provider_keys(
         db, current_user.id, getattr(query_req, "llm_provider", "") or ""
     )
     rag_service = await get_initialized_rag_service(
@@ -116,6 +131,7 @@ async def _prepare_query_service(
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
         llm_model=getattr(query_req, "llm_model", "") or "",
+        embedding_model=embedding_model,
     )
     return kb, rag_service
 
@@ -569,6 +585,14 @@ async def get_conversation_session_detail_api(
             detail="Conversation session not found.",
         )
 
+    def _safe_json_loads(raw: str | None, default):
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return default
+
     turns = [
         ConversationTurnResponse(
             id=turn.id,
@@ -579,8 +603,8 @@ async def get_conversation_session_detail_api(
             mode=turn.mode,
             response_time=turn.response_time,
             token_count=turn.token_count,
-            sources=json.loads(turn.sources_json) if turn.sources_json else [],
-            memory=json.loads(turn.memory_json) if turn.memory_json else {},
+            sources=_safe_json_loads(turn.sources_json, []),
+            memory=_safe_json_loads(turn.memory_json, {}),
             created_at=turn.created_at,
         )
         for turn in session.turns

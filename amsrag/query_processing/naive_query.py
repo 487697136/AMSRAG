@@ -59,13 +59,12 @@ async def naive_query(
             return []
         return PROMPTS["fail_response"]
         
-    # 过滤掉None值以避免'NoneType' object is not subscriptable错误
-    chunks = [c for c in chunks if c is not None and isinstance(c, dict)]
-    
+    # 过滤掉None值以避免'NoneType' object is not subscriptable错误，同时保留与 results 的对应关系
+    paired = [(results[i], c) for i, c in enumerate(chunks) if c is not None and isinstance(c, dict) and i < len(results)]
+
     # 如果所有chunks都是None，尝试重新查询或返回失败响应
-    if not chunks:
+    if not paired:
         logger.warning(f"No valid chunks found for query: {query}")
-        # 尝试降低查询要求
         try:
             if query_param.top_k > 5:
                 logger.info("尝试降低top_k重新查询")
@@ -73,22 +72,24 @@ async def naive_query(
                 if results:
                     chunks_ids = [r["id"] for r in results]
                     chunks = await text_chunks_db.get_by_ids(chunks_ids)
-                    chunks = [c for c in chunks if c is not None and isinstance(c, dict)]
+                    paired = [(results[i], c) for i, c in enumerate(chunks) if c is not None and isinstance(c, dict) and i < len(results)]
         except Exception as retry_error:
             logger.warning(f"重试查询失败: {retry_error}")
-        
-        if not chunks:
+
+        if not paired:
             if return_raw_results:
                 return []
             return PROMPTS["fail_response"]
 
-    # 验证chunks内容
+    # 验证chunks内容，同步过滤时保持 result 对应关系
     valid_chunks = []
-    for chunk in chunks:
+    valid_chunk_results = []
+    for result, chunk in paired:
         if chunk and isinstance(chunk, dict) and "content" in chunk:
             content = chunk.get("content", "")
             if content and isinstance(content, str) and len(content.strip()) > 0:
                 valid_chunks.append(chunk)
+                valid_chunk_results.append(result)
     
     if not valid_chunks:
         logger.warning(f"No chunks with valid content found for query: {query}")
@@ -142,17 +143,16 @@ async def naive_query(
     if return_raw_results:
         try:
             adapter = create_retrieval_adapter()
-            # 构建原始结果格式，合并results和chunks信息
+            # 使用 valid_chunk_results 与 maybe_trun_chunks 对齐（两者均保持原始顺序）
             raw_results_for_adapter = []
-            for i, result in enumerate(results):
-                if i < len(maybe_trun_chunks):
-                    chunk = maybe_trun_chunks[i]
-                    raw_results_for_adapter.append({
-                        "id": result.get("id"),
-                        "score": result.get("score", 0.0),
-                        "content": chunk.get("content", "")
-                    })
-            
+            for i, chunk in enumerate(maybe_trun_chunks):
+                result = valid_chunk_results[i] if i < len(valid_chunk_results) else {}
+                raw_results_for_adapter.append({
+                    "id": result.get("id", ""),
+                    "score": result.get("score", 0.0),
+                    "content": chunk.get("content", "")
+                })
+
             retrieval_results = await adapter.adapt_naive_results(raw_results_for_adapter, query)
             return retrieval_results
         except Exception as adapter_error:

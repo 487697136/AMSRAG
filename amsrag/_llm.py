@@ -78,7 +78,8 @@ def get_amazon_bedrock_async_client_instance():
 async def openai_complete_if_cache(
     model, prompt, system_prompt=None, history_messages=[], **kwargs
 ) -> str:
-    openai_async_client = get_openai_async_client_instance()
+    _bound_client = kwargs.pop("_bound_client", None)
+    openai_async_client = _bound_client if _bound_client is not None else get_openai_async_client_instance()
     hashing_kv: BaseKVStorage = kwargs.pop("hashing_kv", None)
     stream_callback = kwargs.pop("stream_callback", None)
     messages = []
@@ -144,7 +145,15 @@ async def _emit_stream_callback(
         await callback_result
 
 
-def create_openai_compatible_complete_function(model_id: str) -> Callable:
+def create_openai_compatible_complete_function(
+    model_id: str,
+    client: Optional["AsyncOpenAI"] = None,
+) -> Callable:
+    """创建绑定到指定客户端（或默认全局客户端）的 OpenAI 兼容补全函数。
+
+    通过 ``client`` 参数传入专属 ``AsyncOpenAI`` 实例，可避免多个 RAG 服务实例
+    共享全局客户端时因端点/Key 互相覆盖而导致的"Model Not Exist"等错误。
+    """
     async def openai_compatible_complete(
         prompt: str,
         system_prompt: Optional[str] = None,
@@ -156,6 +165,7 @@ def create_openai_compatible_complete_function(model_id: str) -> Callable:
             prompt,
             system_prompt=system_prompt,
             history_messages=history_messages,
+            _bound_client=client,
             **kwargs,
         )
 
@@ -474,10 +484,11 @@ async def siliconflow_embedding(texts: list[str]) -> np.ndarray:
         "encoding_format": "float",
     }
 
-    try:
+    async def _do_request(use_model: str) -> np.ndarray:
+        payload["model"] = use_model
         async with httpx.AsyncClient(timeout=120.0) as client:
             logger.info(
-                "正在发送嵌入请求到 %s/embeddings (model=%s)", api_base, model
+                "正在发送嵌入请求到 %s/embeddings (model=%s)", api_base, use_model
             )
             response = await client.post(
                 f"{api_base}/embeddings", headers=headers, json=payload
@@ -486,6 +497,33 @@ async def siliconflow_embedding(texts: list[str]) -> np.ndarray:
             result = response.json()
             embeddings = [item["embedding"] for item in result["data"]]
             return np.array(embeddings)
-    except Exception as exc:  # 保底兜底，返回随机嵌入以不中断流程
+
+    try:
+        return await _do_request(model)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 403:
+            # Pro 版模型需要付费账号，自动降级到免费版
+            if model.startswith("Pro/"):
+                fallback_model = model[len("Pro/"):]
+                logger.warning(
+                    "嵌入模型 %s 返回 403（无访问权限或额度不足），"
+                    "自动降级到免费版 %s。建议在「设置」页面将嵌入模型改为 %s。",
+                    model, fallback_model, fallback_model,
+                )
+                # 降级后仍然让异常向上传播，以便调用方能感知失败
+                return await _do_request(fallback_model)
+            else:
+                logger.error(
+                    "硅基流动嵌入 API 403 Forbidden（模型=%s）。"
+                    "可能原因：API Key 已过期/无效、账号额度耗尽，或该模型需要付费权限。"
+                    "请前往「设置 → 模型密钥」检查并更新 SiliconFlow API Key。",
+                    model,
+                )
+        else:
+            logger.error("硅基流动嵌入 API 请求失败（HTTP %s）: %s", exc.response.status_code, str(exc))
+        # 抛出异常而不是返回随机向量，防止用垃圾数据污染 FAISS 索引
+        raise RuntimeError(f"硅基流动嵌入 API 调用失败（模型={model}）: {exc}") from exc
+    except Exception as exc:
         logger.error("硅基流动嵌入 API 请求失败: %s", str(exc))
-        return np.random.randn(len(texts), 1024).astype(np.float32)
+        # 同样抛出异常，让建库流程感知到错误，而不是静默写入无效向量
+        raise RuntimeError(f"硅基流动嵌入 API 调用失败（模型={model}）: {exc}") from exc

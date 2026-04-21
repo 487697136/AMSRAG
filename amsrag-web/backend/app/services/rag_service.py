@@ -58,12 +58,17 @@ class RAGService:
         llm_provider: str = "",
         llm_api_key: str = "",
         llm_model: str = "",
+        embedding_model: str = "",
     ) -> bool:
         try:
             GraphRAG, _, FAISSVectorStorage = _load_amsrag_components()
             os.environ["DASHSCOPE_API_KEY"] = dashscope_key
             os.environ["SILICONFLOW_API_KEY"] = siliconflow_key
             os.environ["SILKFLOW_API_KEY"] = siliconflow_key
+            # 注入用户选择的嵌入模型（覆盖默认 BAAI/bge-m3）
+            if embedding_model:
+                os.environ["SILICONFLOW_EMBED_MODEL"] = embedding_model
+                os.environ["SILKFLOW_EMBED_MODEL"] = embedding_model
             os.environ["AMSRAG_ENTITY_EXTRACTION_MODEL"] = (
                 settings.RAG_ENTITY_EXTRACTION_MODEL
             )
@@ -111,30 +116,39 @@ class RAGService:
                         "Neo4j graph backend requested but NEO4J_URL/NEO4J_USERNAME/NEO4J_PASSWORD are incomplete; falling back to NetworkX."
                     )
 
+            from openai import AsyncOpenAI
+            from app.schemas.api_key import PROVIDER_REGISTRY
+
             if llm_provider and llm_api_key and llm_provider != "dashscope":
-                from app.schemas.api_key import PROVIDER_REGISTRY
                 provider_info = PROVIDER_REGISTRY.get(llm_provider, {})
                 base_url = provider_info.get("base_url", "")
-                if base_url:
-                    from openai import AsyncOpenAI
-                    import amsrag._llm as _llm_mod
-                    _llm_mod.global_openai_async_client = AsyncOpenAI(
-                        base_url=base_url,
-                        api_key=llm_api_key,
-                    )
+                llm_client = AsyncOpenAI(
+                    base_url=base_url or None,
+                    api_key=llm_api_key,
+                )
                 best_model_name = llm_model or (provider_info.get("default_models", [""])[0])
                 cheap_model_name = llm_model or best_model_name
             else:
+                # dashscope 或未指定 provider，使用 DashScope 端点
+                _dashscope_key = dashscope_key or os.getenv("DASHSCOPE_API_KEY", "")
+                _dashscope_base = os.getenv(
+                    "DASHSCOPE_API_BASE",
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                )
+                llm_client = AsyncOpenAI(
+                    base_url=_dashscope_base,
+                    api_key=_dashscope_key or "dummy",
+                )
                 best_model_name = llm_model or settings.RAG_BEST_MODEL.strip() or "qwen-plus"
                 cheap_model_name = settings.RAG_CHEAP_MODEL.strip() or "qwen-flash"
                 if llm_model:
                     cheap_model_name = llm_model
 
             best_model_func = create_openai_compatible_complete_function(
-                best_model_name
+                best_model_name, client=llm_client
             )
             cheap_model_func = create_openai_compatible_complete_function(
-                cheap_model_name
+                cheap_model_name, client=llm_client
             )
 
             rag_kwargs: dict[str, Any] = {}
@@ -153,6 +167,7 @@ class RAGService:
                 enable_local=enable_local,
                 enable_naive_rag=enable_naive_rag,
                 enable_bm25=enable_bm25,
+                query_better_than_threshold=0.05,
                 **rag_kwargs,
             )
             self._is_initialized = True
@@ -170,13 +185,17 @@ class RAGService:
             self._is_initialized = False
             return False
 
-    async def insert_document(self, content: str) -> Dict[str, Any]:
+    async def insert_document(
+        self,
+        content: str,
+        progress_callback: Optional[Callable[[int, str], Any]] = None,
+    ) -> Dict[str, Any]:
         if not self._is_initialized or not self.rag_instance:
             raise RuntimeError("RAG instance not initialized")
 
         try:
             logger.info(f"Inserting document, length={len(content)} chars")
-            await self.rag_instance.ainsert(content)
+            await self.rag_instance.ainsert(content, progress_callback=progress_callback)
             stats = self.get_statistics()
             logger.info(f"Document inserted successfully: {stats}")
             return stats
@@ -194,6 +213,49 @@ class RAGService:
                     f"(user={self.user_id}, kb={self.kb_id}) so it is re-initialized next time."
                 )
                 self._is_initialized = False
+            raise
+
+    async def rebuild_graph_index(
+        self,
+        progress_callback=None,
+    ) -> dict:
+        """
+        仅重建知识图谱（实体抽取、图聚类、社区报告），保留 FAISS 和 BM25 向量索引。
+        """
+        if not self._is_initialized or not self.rag_instance:
+            raise RuntimeError("RAG instance not initialized")
+
+        try:
+            logger.info("Starting graph-only rebuild (user={}, kb={})", self.user_id, self.kb_id)
+            result = await self.rag_instance.rebuild_graph_only(
+                progress_callback=progress_callback
+            )
+            logger.info("Graph rebuild completed: {}", result)
+            return result
+        except Exception as exc:
+            logger.exception("Failed to rebuild graph: {}", exc)
+            raise
+
+    async def rebuild_vector_index(
+        self,
+        progress_callback=None,
+    ) -> dict:
+        """
+        仅重建 FAISS 向量索引和 BM25 索引，不重新运行实体抽取和知识图谱构建。
+        用于修复因 Embedding API 故障导致的向量污染，速度远快于完整重建。
+        """
+        if not self._is_initialized or not self.rag_instance:
+            raise RuntimeError("RAG instance not initialized")
+
+        try:
+            logger.info("Starting vector-only index rebuild (user={}, kb={})", self.user_id, self.kb_id)
+            result = await self.rag_instance.rebuild_vector_index_only(
+                progress_callback=progress_callback
+            )
+            logger.info("Vector index rebuild completed: {}", result)
+            return result
+        except Exception as exc:
+            logger.exception("Failed to rebuild vector index: {}", exc)
             raise
 
     def _normalize_mode(self, mode: str) -> str:
@@ -954,9 +1016,10 @@ def _build_service_cache_key(
     enable_bm25: bool,
     llm_provider: str = "",
     llm_model: str = "",
+    embedding_model: str = "",
 ) -> ServiceCacheKey:
     secret_fingerprint = hashlib.sha256(
-        f"{dashscope_key}::{siliconflow_key}::{llm_provider}::{llm_model}".encode("utf-8")
+        f"{dashscope_key}::{siliconflow_key}::{llm_provider}::{llm_model}::{embedding_model}".encode("utf-8")
     ).hexdigest()
     return (
         user_id,
@@ -979,6 +1042,7 @@ async def get_initialized_rag_service(
     llm_provider: str = "",
     llm_api_key: str = "",
     llm_model: str = "",
+    embedding_model: str = "",
 ) -> RAGService:
     cache_key = _build_service_cache_key(
         user_id=user_id,
@@ -990,6 +1054,7 @@ async def get_initialized_rag_service(
         enable_bm25=enable_bm25,
         llm_provider=llm_provider,
         llm_model=llm_model,
+        embedding_model=embedding_model,
     )
 
     async with _rag_service_cache_lock:
@@ -1015,6 +1080,7 @@ async def get_initialized_rag_service(
             llm_provider=llm_provider,
             llm_api_key=llm_api_key,
             llm_model=llm_model,
+            embedding_model=embedding_model,
         )
         if not init_success:
             raise RuntimeError(

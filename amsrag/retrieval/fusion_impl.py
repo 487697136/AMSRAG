@@ -80,8 +80,8 @@ class FusionConfig:
 
     # MMR 多样性约束参数（论文公式 11）
     enable_mmr: bool = True
-    mmr_lambda: float = 0.5
-    mmr_similarity_threshold: float = 0.85  # 与已选结果的最大相似度阈值
+    mmr_lambda: float = 0.3   # 降低多样性惩罚权重，更倾向于相关性（原0.5）
+    mmr_similarity_threshold: float = 0.95  # 仅在内容几乎完全相同时才停止（原0.85）
 
     # 语义相似度配置（用于MMR和去重）
     embedding_func: Optional[Callable] = None  # 嵌入函数，用于语义相似度计算
@@ -539,7 +539,8 @@ class ConfidenceAwareFusion:
             for source, results in results_by_source.items():
                 canonical = {"dense": "vector", "graph": "local"}.get(source, source)
                 k_r = k_by_source.get(canonical, self.config.k)
-                w_r = source_weights.get(source, 1.0)
+                # 优先用规范化名称查权重，其次原名，未知 source 权重为 0（不纳入计分）
+                w_r = source_weights.get(canonical, source_weights.get(source, 0.0))
 
                 # 查找该结果在当前源中的 rank
                 rank_in_source: Optional[int] = None
@@ -693,8 +694,9 @@ class ConfidenceAwareFusion:
                     best_idx = idx
                     best_max_sim = max_sim
             
-            # 检查停止条件
-            if best_idx == -1 or best_mmr_score < 0.01 or best_max_sim >= sim_threshold:
+            # 检查停止条件：仅在内容近乎完全重复时跳过（相似度已由sim_threshold控制在0.95）
+            # 注：移除 best_mmr_score < 0.01 的硬截断，避免因CA-RRF分值量纲导致过早停止
+            if best_idx == -1 or best_max_sim >= sim_threshold:
                 break
             
             selected_indices.append(best_idx)
@@ -861,8 +863,9 @@ class ConfidenceAwareFusion:
             mmr_scores.sort(key=lambda x: x[1], reverse=True)
             best_cand, best_score, best_sim = mmr_scores[0]
 
-            # 若得分过低或与已有结果高度相似，则停止扩展
-            if best_score < 0.01 or best_sim >= sim_threshold:
+            # 仅当内容近乎完全重复时才停止扩展（阈值由mmr_similarity_threshold=0.95控制）
+            # 注：移除 best_score < 0.01 的硬截断，避免因CA-RRF分值量纲导致过早停止
+            if best_sim >= sim_threshold:
                 break
 
             selected.append(best_cand)

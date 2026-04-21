@@ -36,10 +36,12 @@ def _pack_single_community_by_sub_communities(
     all_sub_communities = sorted(
         all_sub_communities, key=lambda x: x["occurrence"], reverse=True
     )
+    tiktoken_model = get_tiktoken_encoder("gpt-4o")
     may_trun_all_sub_communities = truncate_list_by_token_size(
         all_sub_communities,
+        max_token_size,
+        tiktoken_model,
         key=lambda x: x["report_string"],
-        max_token_size=max_token_size,
     )
     sub_fields = ["id", "report", "rating", "importance"]
     sub_communities_describe = list_of_list_to_csv(
@@ -48,7 +50,7 @@ def _pack_single_community_by_sub_communities(
             [
                 i,
                 c["report_string"],
-                c["report_json"].get("rating", -1),
+                c["report_json"].get("rating", -1) if isinstance(c.get("report_json"), dict) else -1,
                 c["occurrence"],
             ]
             for i, c in enumerate(may_trun_all_sub_communities)
@@ -71,8 +73,8 @@ async def _pack_single_community_describe(
     knwoledge_graph_inst: BaseGraphStorage,
     community: SingleCommunitySchema,
     max_token_size: int = 12000,
-    already_reports: Dict[str, CommunitySchema] = {},
-    global_config: Dict[str, Any] = {},
+    already_reports: Dict[str, CommunitySchema] = None,
+    global_config: Dict[str, Any] = None,
 ) -> str:
     """
     打包单个社区描述
@@ -88,7 +90,12 @@ async def _pack_single_community_describe(
         社区描述字符串
     """
     import asyncio
-    
+
+    if already_reports is None:
+        already_reports = {}
+    if global_config is None:
+        global_config = {}
+
     nodes_in_order = sorted(community["nodes"])
     edges_in_order = sorted(community["edges"], key=lambda x: x[0] + x[1])
 
@@ -105,11 +112,12 @@ async def _pack_single_community_describe(
         [
             i,
             node_name,
-            node_data.get("entity_type", "UNKNOWN"),
-            node_data.get("description", "UNKNOWN"),
+            node_data.get("entity_type", "UNKNOWN") if isinstance(node_data, dict) else "UNKNOWN",
+            node_data.get("description", "UNKNOWN") if isinstance(node_data, dict) else "UNKNOWN",
             node_degrees[i],
         ]
         for i, (node_name, node_data) in enumerate(zip(nodes_in_order, nodes_data))
+        if node_data is not None
     ]
     nodes_list_data = sorted(nodes_list_data, key=lambda x: x[-1], reverse=True)
     # 创建tiktoken编码器
@@ -123,10 +131,11 @@ async def _pack_single_community_describe(
             i,
             edge_name[0],
             edge_name[1],
-            edge_data.get("description", "UNKNOWN"),
+            edge_data.get("description", "UNKNOWN") if isinstance(edge_data, dict) else "UNKNOWN",
             edge_degrees[i]
         ]
         for i, (edge_name, edge_data) in enumerate(zip(edges_in_order, edges_data))
+        if edge_data is not None
     ]
     edges_list_data = sorted(edges_list_data, key=lambda x: x[-1], reverse=True)
     edges_may_truncate_list_data = truncate_list_by_token_size(

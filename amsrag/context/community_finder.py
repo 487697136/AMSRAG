@@ -23,38 +23,42 @@ async def _find_most_related_text_unit_from_entities(
     """
     Collect and rank text chunks connected to seed entities.
     """
+    # 过滤掉缺少必要字段的节点，避免 KeyError，同时保证 text_units 与 edges 下标对齐
+    valid_node_datas = [dp for dp in node_datas if dp.get("entity_name") and dp.get("source_id") is not None]
     text_units = [
-        split_string_by_multi_markers(dp["source_id"], [GRAPH_FIELD_SEP])
-        for dp in node_datas
+        split_string_by_multi_markers(dp.get("source_id", ""), [GRAPH_FIELD_SEP])
+        for dp in valid_node_datas
     ]
     edges = await knowledge_graph_inst.get_nodes_edges_batch(
-        [dp["entity_name"] for dp in node_datas]
+        [dp["entity_name"] for dp in valid_node_datas]
     )
 
     all_one_hop_nodes = set()
     for this_edges in edges:
         if not this_edges:
             continue
-        all_one_hop_nodes.update([e[1] for e in this_edges])
+        # 边结构为 (src, dst, ...) 防御性检查长度
+        all_one_hop_nodes.update([e[1] for e in this_edges if len(e) > 1])
 
     all_one_hop_nodes_data_dict = await knowledge_graph_inst.get_nodes_batch(
         list(all_one_hop_nodes)
     )
     all_one_hop_text_units_lookup = {
-        k: set(split_string_by_multi_markers(v["source_id"], [GRAPH_FIELD_SEP]))
+        k: set(split_string_by_multi_markers(v.get("source_id", ""), [GRAPH_FIELD_SEP]))
         for k, v in all_one_hop_nodes_data_dict.items()
         if v is not None
     }
 
     all_text_units_lookup = {}
     for index, (this_text_units, this_edges) in enumerate(zip(text_units, edges)):
+        safe_edges = this_edges or []
         for chunk_id in this_text_units:
             if chunk_id in all_text_units_lookup:
                 continue
 
             relation_counts = 0
-            for edge in this_edges:
-                if (
+            for edge in safe_edges:
+                if len(edge) > 1 and (
                     edge[1] in all_one_hop_text_units_lookup
                     and chunk_id in all_one_hop_text_units_lookup[edge[1]]
                 ):
@@ -66,13 +70,13 @@ async def _find_most_related_text_unit_from_entities(
                 "relation_counts": relation_counts,
             }
 
-    if any(value is None for value in all_text_units_lookup.values()):
+    if any(v.get("data") is None for v in all_text_units_lookup.values()):
         logger.warning("Text chunks are missing, storage may be inconsistent.")
 
     all_text_units = [
         {"id": key, **value}
         for key, value in all_text_units_lookup.items()
-        if value is not None
+        if value.get("data") is not None
     ]
     all_text_units = sorted(
         all_text_units, key=lambda item: (item["order"], -item["relation_counts"])
@@ -83,7 +87,7 @@ async def _find_most_related_text_unit_from_entities(
         all_text_units,
         query_param.local_max_token_for_text_unit,
         tiktoken_model,
-        key=lambda item: item["data"]["content"],
+        key=lambda item: item["data"].get("content", "") if isinstance(item["data"], dict) else "",
     )
     return [item["data"] for item in all_text_units]
 

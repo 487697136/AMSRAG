@@ -154,7 +154,9 @@ def split_text_by_length(text: str, max_length: int = 1000, overlap: int = 100) 
         else:
             # 没有找到合适的分割点，强制分割
             chunks.append(text[start:end])
-            start = end - overlap  # 保留一定重叠
+            # 确保 start 始终向前推进，防止 overlap >= max_length 时死循环
+            new_start = end - overlap
+            start = new_start if new_start > start else end
             
     return chunks
 

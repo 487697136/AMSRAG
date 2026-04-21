@@ -33,6 +33,8 @@ class Document(DocumentBase):
     file_type: Optional[str]
     status: str
     error_message: Optional[str]
+    progress: int = 0
+    progress_stage: Optional[str] = ""
     chunk_count: int
     created_at: datetime
     updated_at: datetime

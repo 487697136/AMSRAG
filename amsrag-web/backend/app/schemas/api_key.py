@@ -18,6 +18,16 @@ SUPPORTED_EMBEDDING_PROVIDERS = [
     "siliconflow",
 ]
 
+# 各嵌入 provider 支持的模型列表（key = provider，value = [model_name, ...]）
+EMBEDDING_MODELS: dict[str, list[str]] = {
+    "siliconflow": ["BAAI/bge-m3", "Pro/BAAI/bge-m3"],
+}
+
+# 各 provider 的默认嵌入模型
+DEFAULT_EMBEDDING_MODEL: dict[str, str] = {
+    "siliconflow": "BAAI/bge-m3",
+}
+
 SUPPORTED_PROVIDERS = SUPPORTED_LLM_PROVIDERS + SUPPORTED_EMBEDDING_PROVIDERS
 
 PROVIDER_REGISTRY = {
@@ -61,7 +71,7 @@ PROVIDER_REGISTRY = {
         "label": "SiliconFlow（硅基流动）",
         "base_url": "https://api.siliconflow.cn/v1",
         "type": "embedding",
-        "default_models": ["BAAI/bge-m3"],
+        "default_models": ["BAAI/bge-m3", "Pro/BAAI/bge-m3"],
     },
 }
 
@@ -71,6 +81,8 @@ PROVIDER_PATTERN = "^(" + "|".join(SUPPORTED_PROVIDERS) + ")$"
 class APIKeyBase(BaseModel):
     provider: str = Field(..., pattern=PROVIDER_PATTERN)
     description: Optional[str] = None
+    # 嵌入模型名称，仅对 embedding 类型的 provider 有效
+    model_name: Optional[str] = None
 
 
 class APIKeyCreate(APIKeyBase):
@@ -80,6 +92,7 @@ class APIKeyCreate(APIKeyBase):
 class APIKeyUpdate(BaseModel):
     api_key: Optional[str] = Field(None, min_length=10)
     description: Optional[str] = None
+    model_name: Optional[str] = None
 
 
 class APIKey(APIKeyBase):

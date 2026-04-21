@@ -35,20 +35,37 @@ def compute_graph_namespace(user_id: int, kb_id: int) -> str | None:
         return None
 
 
-def get_provider_keys(db, user_id: int) -> tuple[str | None, str | None, str | None]:
+def get_provider_keys(db, user_id: int) -> tuple[str | None, str | None, str | None, str]:
     """
     Resolve keys from user's configured API keys.
 
     Returns:
-      (llm_provider, llm_api_key, embedding_api_key)
+      (llm_provider, llm_api_key, embedding_api_key, embedding_model)
+      embedding_model defaults to "BAAI/bge-m3" if not explicitly set.
     """
+    from app.schemas.api_key import DEFAULT_EMBEDDING_MODEL
+
     all_keys = db.query(APIKey).filter(APIKey.user_id == user_id).all()
-    key_map = {k.provider: decrypt_api_key(k.encrypted_key) for k in all_keys}
+    key_map: dict = {}
+    # 同时保存 model_name 字段
+    model_map: dict = {}
+    for k in all_keys:
+        try:
+            decrypted = decrypt_api_key(k.encrypted_key)
+            if decrypted:
+                key_map[k.provider] = decrypted
+                if k.model_name:
+                    model_map[k.provider] = k.model_name
+        except Exception as _dec_err:
+            logger.warning(f"Failed to decrypt API key for provider={k.provider}: {_dec_err}")
 
     # Embedding: currently the system uses SiliconFlow embedding.
     embedding_api_key = key_map.get("siliconflow")
     if not embedding_api_key:
-        return None, None, None
+        return None, None, None, ""
+
+    # 读取用户为 siliconflow 设置的模型，默认 BAAI/bge-m3
+    embedding_model = model_map.get("siliconflow") or DEFAULT_EMBEDDING_MODEL.get("siliconflow", "BAAI/bge-m3")
 
     # LLM: pick the first configured LLM provider (prefer dashscope).
     llm_candidates_prefer = ("dashscope", "openai", "deepseek", "zhipu", "moonshot", "openrouter")
@@ -66,13 +83,13 @@ def get_provider_keys(db, user_id: int) -> tuple[str | None, str | None, str | N
                 break
 
     if not llm_provider:
-        return None, None, None
+        return None, None, None, ""
 
     llm_api_key = key_map.get(llm_provider)
     if not llm_api_key:
-        return None, None, None
+        return None, None, None, ""
 
-    return llm_provider, llm_api_key, embedding_api_key
+    return llm_provider, llm_api_key, embedding_api_key, embedding_model
 
 
 async def close_cached_rag_service(user_id: int, kb_id: int) -> None:
@@ -207,7 +224,7 @@ def detect_graph_source(user_id: int, kb_id: int, stats: dict[str, Any] | None =
     }
 
 async def rebuild_kb_runtime(db, current_user, kb, documents: list[Document] | None = None) -> dict[str, Any]:
-    llm_provider, llm_api_key, embedding_api_key = get_provider_keys(db, current_user.id)
+    llm_provider, llm_api_key, embedding_api_key, embedding_model = get_provider_keys(db, current_user.id)
     if not llm_provider or not llm_api_key or not embedding_api_key:
         raise RuntimeError("缺少必要的密钥：请先配置一个可用的 LLM 密钥和一个嵌入密钥。")
 
@@ -247,6 +264,7 @@ async def rebuild_kb_runtime(db, current_user, kb, documents: list[Document] | N
         enable_bm25=kb.enable_bm25,
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
+        embedding_model=embedding_model,
     )
 
     processed_documents = []

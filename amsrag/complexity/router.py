@@ -1,4 +1,4 @@
-﻿"""
+"""
 澶嶆潅搴︽劅鐭ヨ矾鐢卞櫒妯″潡
 鍩轰簬鏌ヨ澶嶆潅搴﹁嚜鍔ㄩ€夋嫨鏈€浣虫绱㈢瓥鐣?
 """
@@ -38,7 +38,7 @@ class ComplexityAwareRouter(BaseRouter):
     
     model_path: str = "amsrag/models/modernbert_complexity_classifier_standard"
     confidence_threshold: float = 0.6
-    enable_fallback: bool = True
+    enable_fallback: bool = False  # 严格使用ModernBERT，禁止基于置信度的规则回退
     use_modernbert: bool = True
     
     def __post_init__(self):
@@ -96,11 +96,40 @@ class ComplexityAwareRouter(BaseRouter):
                     "method": "modernbert"
                 }
             else:
-                # 鍥為€€鍒拌鍒欏垎绫?
+                if not self.enable_fallback:
+                    # 严格模式：分类器不可用时使用保守默认值，不降级到规则分类
+                    logger.error(
+                        "ModernBERT分类器不可用且enable_fallback=False，"
+                        "使用保守默认值 one_hop 以维持系统运行"
+                    )
+                    self._complexity_stats["one_hop"] += 1
+                    return {
+                        "complexity": "one_hop",
+                        "confidence": 0.5,
+                        "probabilities": {},
+                        "candidate_modes": self._complexity_to_candidate.get(
+                            "one_hop", ["local", "naive", "bm25"]
+                        ),
+                        "method": "modernbert_unavailable_default"
+                    }
+                # 回退到规则分类（仅当 enable_fallback=True 时）
                 return await self._rule_based_complexity(query)
                 
         except Exception as e:
-            logger.error(f"澶嶆潅搴﹂娴嬪け璐? {e}")
+            logger.error(f"ModernBERT复杂度预测失败: {e}")
+            if not self.enable_fallback:
+                # 严格模式：异常时也不降级，使用保守默认值
+                logger.error("严格模式: enable_fallback=False，异常情况下使用保守默认值 one_hop")
+                self._complexity_stats["one_hop"] += 1
+                return {
+                    "complexity": "one_hop",
+                    "confidence": 0.5,
+                    "probabilities": {},
+                    "candidate_modes": self._complexity_to_candidate.get(
+                        "one_hop", ["local", "naive", "bm25"]
+                    ),
+                    "method": "modernbert_exception_default"
+                }
             return await self._rule_based_complexity(query)
     
     async def predict_complexity(self, query: str) -> str:
@@ -108,6 +137,16 @@ class ComplexityAwareRouter(BaseRouter):
         result = await self.predict_complexity_detailed(query)
         return result["complexity"]
     
+    # 需要 global（社区报告）检索的中文关键词
+    _GLOBAL_CN_KEYWORDS = [
+        "讲的是什么", "讲什么", "主要讲", "主要内容", "内容是什么",
+        "关于什么", "是关于", "介绍", "概述", "总结", "概括", "综述",
+        "整体", "总体", "全面", "综合", "整个", "主题", "主旨",
+        "说的是什么", "写的是什么", "描述的是什么",
+        "这本书", "这篇文章", "这份文档", "这个知识库", "此知识库",
+        "有哪些", "都有什么", "包含什么", "涉及什么", "涵盖",
+    ]
+
     async def _rule_based_complexity(self, query: str) -> Dict[str, Any]:
         """鍩轰簬瑙勫垯鐨勫鏉傚害鍒嗙被"""
         # 绠€鍗曠殑瑙勫垯鍒嗙被
@@ -121,6 +160,9 @@ class ComplexityAwareRouter(BaseRouter):
                 complexity = "one_hop"
         # multi-hop 瑙勫垯
         elif any(word in query_lower for word in ["compare", "relationship", "difference", "similarity", "how does", "why does"]):
+            complexity = "multi_hop"
+        # multi-hop 规则（中文概述/元问题）
+        elif any(kw in query for kw in self._GLOBAL_CN_KEYWORDS):
             complexity = "multi_hop"
         else:
             complexity = "one_hop"
@@ -244,6 +286,9 @@ class ComplexityAwareRouter(BaseRouter):
         # multi-hop 瑙勫垯
         elif any(word in query_lower for word in ["compare", "relationship", "difference", "similarity", "how does", "why does"]):
             complexity = "multi_hop"
+        # multi-hop 规则（中文概述/元问题）
+        elif any(kw in query for kw in self._GLOBAL_CN_KEYWORDS):
+            complexity = "multi_hop"
         else:
             complexity = "one_hop"
         
@@ -273,7 +318,7 @@ class ComplexityAwareRouter(BaseRouter):
             "fallback": 0
         }
     
-    def get_retrieval_plan(self, complexity_result: Dict[str, Any], available_modes: List[str] = None) -> List[str]:
+    def get_retrieval_plan(self, complexity_result: Dict[str, Any], available_modes: List[str] = None, query: str = "") -> List[str]:
         """
         鍩轰簬缃俊搴﹀拰澶嶆潅搴︽鐜囧垎甯冪敓鎴愭绱㈣鍒?
         
@@ -303,7 +348,7 @@ class ComplexityAwareRouter(BaseRouter):
             return self._get_dual_modes_robust(complexity_result, available_modes)
         else:
             # 绛栫暐C锛氫綆缃俊搴﹀璺緞
-            return self._get_multi_modes_with_global_strategy(complexity_result, available_modes)
+            return self._get_multi_modes_with_global_strategy(complexity_result, available_modes, query=query)
     
     def _get_optimal_mode(self, complexity_result: Dict[str, Any], available_modes: List[str]) -> List[str]:
         """鑾峰彇鏈€浼樺崟涓€妯″紡锛堢瓥鐣锛?"""
@@ -416,7 +461,7 @@ class ComplexityAwareRouter(BaseRouter):
         # 濡傛灉娌℃湁鐞嗘兂缁勫悎锛岃繑鍥炲墠涓や釜鍙敤妯″紡
         return available_modes[:2] if len(available_modes) >= 2 else available_modes
     
-    def _get_multi_modes_with_global_strategy(self, complexity_result: Dict[str, Any], available_modes: List[str]) -> List[str]:
+    def _get_multi_modes_with_global_strategy(self, complexity_result: Dict[str, Any], available_modes: List[str], query: str = "") -> List[str]:
         """
         甯lobal绛栫暐鐨勫璺緞閫夋嫨锛堢瓥鐣锛?
         
@@ -432,7 +477,7 @@ class ComplexityAwareRouter(BaseRouter):
         selected_modes = [mode for mode in base_modes if mode in available_modes]
         
         # Global妫€绱㈠喅绛?
-        should_use_global = self._should_trigger_global_retrieval(complexity_result)
+        should_use_global = self._should_trigger_global_retrieval(complexity_result, query=query)
         
         if should_use_global and "global" in available_modes:
             # 绛栫暐锛氱敤global鏇挎崲local锛堥伩鍏嶅浘妫€绱㈤噸澶嶏紝鍥犱负global鍖呭惈local淇℃伅锛?

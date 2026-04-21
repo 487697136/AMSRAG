@@ -68,7 +68,7 @@
               <div class="provider-block__head">
                 <div>
                   <div class="provider-section__title">嵌入密钥</div>
-                  <div class="provider-section__hint">用于文档向量化检索。当前系统默认使用 SiliconFlow 嵌入。</div>
+                  <div class="provider-section__hint">用于文档向量化检索。可在新增/编辑密钥时选择具体嵌入模型。</div>
                 </div>
                 <n-button size="small" type="primary" @click="openAddModal('embedding')">新增密钥</n-button>
               </div>
@@ -78,7 +78,13 @@
                   <div class="provider-card__header">
                     <div>
                       <div class="provider-card__title">{{ providerStore.displayKeyName(k) }}</div>
-                      <div class="provider-card__desc">{{ providerStore.providerLabel(k.provider) }}</div>
+                      <div class="provider-card__desc">
+                        {{ providerStore.providerLabel(k.provider) }}
+                        <span v-if="k.model_name" :class="['model-badge', k.model_name.startsWith('Pro/') ? 'model-badge--pro' : '']">
+                          {{ k.model_name }}{{ k.model_name.startsWith('Pro/') ? '（付费）' : '' }}
+                        </span>
+                        <span v-else class="model-badge model-badge--default">BAAI/bge-m3（默认·免费）</span>
+                      </div>
                     </div>
                     <span class="status-badge status-badge--success">已配置</span>
                   </div>
@@ -97,7 +103,20 @@
                   <n-input :value="modalTypeLabel" disabled />
                 </n-form-item>
                 <n-form-item label="服务商">
-                  <n-select v-model:value="keyModal.provider" :options="modalProviderOptions" />
+                  <n-select v-model:value="keyModal.provider" :options="modalProviderOptions" :disabled="modalMode === 'edit'" />
+                </n-form-item>
+                <!-- 嵌入模型选择（仅 embedding 类型显示） -->
+                <n-form-item v-if="modalType === 'embedding'" label="嵌入模型">
+                  <n-select
+                    v-model:value="keyModal.modelName"
+                    :options="modalEmbeddingModelOptions"
+                    placeholder="选择嵌入模型"
+                  />
+                  <template #feedback>
+                    <span style="font-size:12px;color:var(--n-text-color-3)">
+                      Pro/BAAI/bge-m3 为高性能版本，与标准版使用同一 API Key
+                    </span>
+                  </template>
                 </n-form-item>
                 <n-form-item label="密钥名称（自定义）">
                   <n-input v-model:value="keyModal.description" placeholder="例如：公司内网 LLM / 生产环境 / 某模型组" />
@@ -192,7 +211,7 @@ const graphBackendCaption = computed(() => {
 const showKeyModal = ref(false)
 const modalMode = ref('add')
 const modalType = ref('llm')
-const keyModal = reactive({ id: null, provider: '', description: '', apiKey: '' })
+const keyModal = reactive({ id: null, provider: '', description: '', apiKey: '', modelName: '' })
 
 const modalTypeLabel = computed(() => (modalType.value === 'llm' ? 'LLM 密钥' : '嵌入密钥'))
 
@@ -203,11 +222,25 @@ const modalProviderOptions = computed(() => {
     .map(([provider, info]) => ({ label: info?.label || provider, value: provider }))
 })
 
+// 当前选中嵌入 provider 的可用模型列表
+const modalEmbeddingModelOptions = computed(() => {
+  if (modalType.value !== 'embedding' || !keyModal.provider) return []
+  const models = providerStore.registry?.[keyModal.provider]?.default_models || []
+  return models.map((m) => ({
+    label: m.startsWith('Pro/') ? `${m}（付费账号）` : `${m}（免费）`,
+    value: m,
+  }))
+})
+
 function resetKeyModal() {
   keyModal.id = null
   keyModal.provider = modalProviderOptions.value[0]?.value || ''
   keyModal.description = ''
   keyModal.apiKey = ''
+  // 嵌入模型默认取第一个（即 BAAI/bge-m3）
+  const defaultProvider = keyModal.provider
+  const models = providerStore.registry?.[defaultProvider]?.default_models || []
+  keyModal.modelName = models[0] || ''
 }
 
 function openAddModal(type) {
@@ -224,6 +257,10 @@ function openEditModal(key) {
   keyModal.provider = key.provider
   keyModal.description = key.description || ''
   keyModal.apiKey = ''
+  // 回填已保存的模型名称
+  const savedModel = key.model_name
+  const availableModels = providerStore.registry?.[key.provider]?.default_models || []
+  keyModal.modelName = savedModel || availableModels[0] || ''
   showKeyModal.value = true
 }
 
@@ -232,7 +269,12 @@ async function handleSaveKeyModal() {
   if (!keyModal.apiKey.trim()) { message.warning('请输入 API Key'); return }
   try {
     savingProvider.value = keyModal.id || '__new__'
-    await saveApiKey({ provider: keyModal.provider, description: keyModal.description || null, api_key: keyModal.apiKey.trim() })
+    await saveApiKey({
+      provider: keyModal.provider,
+      description: keyModal.description || null,
+      api_key: keyModal.apiKey.trim(),
+      model_name: modalType.value === 'embedding' ? (keyModal.modelName || null) : null,
+    })
     message.success('密钥已保存')
     showKeyModal.value = false
     providerStore.invalidate()
@@ -328,7 +370,10 @@ onMounted(loadSettingsData)
 .provider-card__header { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
 .provider-card__actions { display:flex; gap:10px; margin-top: 10px; }
 .provider-card__title { font-size:15px; font-weight:700; color:var(--text-1); }
-.provider-card__desc { margin-top:4px; font-size:12px; color:var(--text-4); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.provider-card__desc { margin-top:4px; font-size:12px; color:var(--text-4); display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.model-badge { display:inline-flex; align-items:center; height:18px; padding:0 7px; border-radius:999px; background:rgba(37,99,235,0.10); border:1px solid rgba(37,99,235,0.18); color:var(--brand-600); font-size:11px; font-weight:700; white-space:nowrap; }
+.model-badge--default { background:rgba(100,116,139,0.10); border-color:rgba(100,116,139,0.20); color:var(--text-4); }
+.model-badge--pro { background:rgba(217,119,6,0.12); border-color:rgba(217,119,6,0.30); color:#b45309; }
 .provider-section__title { font-size:15px; font-weight:700; color:var(--text-1); margin-bottom:4px; }
 .provider-section__hint { font-size:12px; color:var(--text-4); margin-bottom:12px; }
 .security-form { display:flex; flex-direction:column; gap:8px; }

@@ -24,10 +24,18 @@ async def _find_most_related_community_from_entities(
     for node_data in node_datas:
         if "clusters" not in node_data:
             continue
-        related_communities.extend(json.loads(node_data["clusters"]))
+        try:
+            related_communities.extend(json.loads(node_data["clusters"]))
+        except (json.JSONDecodeError, TypeError):
+            continue
 
     related_community_dup_keys = [
-        str(dp["cluster"]) for dp in related_communities if dp["level"] <= query_param.level
+        str(dp["cluster"])
+        for dp in related_communities
+        if isinstance(dp, dict)
+        and dp.get("cluster") is not None  # 防止缺少 cluster 键
+        and dp.get("level") is not None
+        and dp["level"] <= query_param.level
     ]
     related_community_keys_counts = dict(Counter(related_community_dup_keys))
 
@@ -39,11 +47,14 @@ async def _find_most_related_community_from_entities(
         for key, value in zip(related_community_keys_counts.keys(), fetched)
         if value is not None
     }
+    # 只对已成功加载的社区做排序，避免 KeyError
     related_community_keys = sorted(
-        related_community_keys_counts.keys(),
+        related_community_datas.keys(),
         key=lambda key: (
             related_community_keys_counts[key],
-            related_community_datas[key]["report_json"].get("rating", -1),
+            related_community_datas[key]["report_json"].get("rating", -1)
+            if isinstance(related_community_datas[key].get("report_json"), dict)
+            else -1,
         ),
         reverse=True,
     )
@@ -54,7 +65,7 @@ async def _find_most_related_community_from_entities(
         sorted_community_datas,
         query_param.local_max_token_for_community_report,
         tiktoken_model,
-        key=lambda item: item["report_string"],
+        key=lambda item: item.get("report_string", ""),
     )
     if query_param.local_community_single_one:
         use_community_reports = use_community_reports[:1]

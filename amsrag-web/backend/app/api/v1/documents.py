@@ -64,10 +64,12 @@ async def process_document_background(doc_id: int, user_id: int, kb_id: int, tex
             return
 
         doc.status = DocumentStatus.PROCESSING
+        doc.progress = 0
+        doc.progress_stage = "准备就绪"
         doc.error_message = None
         db.commit()
 
-        llm_provider, llm_api_key, embedding_api_key = get_provider_keys(db, user_id)
+        llm_provider, llm_api_key, embedding_api_key, embedding_model = get_provider_keys(db, user_id)
         if not llm_provider or not llm_api_key or not embedding_api_key:
             raise RuntimeError("缺少必要的密钥：请先配置一个可用的 LLM 密钥和一个嵌入密钥。")
 
@@ -81,10 +83,26 @@ async def process_document_background(doc_id: int, user_id: int, kb_id: int, tex
             enable_bm25=kb.enable_bm25,
             llm_provider=llm_provider,
             llm_api_key=llm_api_key,
+            embedding_model=embedding_model,
         )
 
+        def _on_progress(pct: int, stage: str) -> None:
+            """同步进度回调：更新数据库中的文档进度字段。"""
+            try:
+                _progress_db = SessionLocal()
+                try:
+                    _doc = _progress_db.query(Document).filter(Document.id == doc_id).first()
+                    if _doc:
+                        _doc.progress = pct
+                        _doc.progress_stage = stage
+                        _progress_db.commit()
+                finally:
+                    _progress_db.close()
+            except Exception as _e:
+                logger.warning(f"Failed to update document progress: {_e}")
+
         before_chunks = int(rag_service.get_statistics().get("chunks", 0))
-        stats = await rag_service.insert_document(text_content)
+        stats = await rag_service.insert_document(text_content, progress_callback=_on_progress)
         after_chunks = int(stats.get("chunks", before_chunks))
 
         doc.status = DocumentStatus.COMPLETED
@@ -154,6 +172,11 @@ async def upload_document(
     if not kb:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found")
 
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="未提供文件名，请重新上传。",
+        )
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in settings.get_allowed_extensions():
         allowed = ", ".join(settings.get_allowed_extensions())
@@ -206,6 +229,27 @@ async def get_document(doc_id: int, current_user: User = Depends(get_current_use
     if not kb:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     return doc
+
+
+@router.get("/{doc_id}/progress")
+async def get_document_progress(
+    doc_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """轻量级进度查询端点，前端轮询时使用以减少流量。"""
+    doc, kb = _get_owned_document(db, current_user.id, doc_id)
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if not kb:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    return {
+        "id": doc.id,
+        "status": doc.status,
+        "progress": getattr(doc, "progress", 0) or 0,
+        "progress_stage": getattr(doc, "progress_stage", "") or "",
+        "error_message": doc.error_message,
+    }
 
 
 @router.post("/{doc_id}/reprocess", response_model=DocSchema)
@@ -275,7 +319,7 @@ async def delete_document(
         db.commit()
         return None
 
-    llm_provider, llm_api_key, embedding_api_key = get_provider_keys(db, current_user.id)
+    llm_provider, llm_api_key, embedding_api_key, _embedding_model = get_provider_keys(db, current_user.id)
     if llm_provider and llm_api_key and embedding_api_key:
         # Deletion should not be blocked by rebuild failures. We delete & commit first,
         # then rebuild the KB runtime in the background.

@@ -38,27 +38,31 @@ async def _map_global_communities(
     use_string_json_convert_func = global_config["convert_response_to_json_func"]
     use_model_func = global_config["best_model_func"]
     community_groups = []
+    tiktoken_model = get_tiktoken_encoder("gpt-4o")
     while len(communities_data):
-        # 创建tiktoken编码器
-        tiktoken_model = get_tiktoken_encoder("gpt-4o")
         this_group = truncate_list_by_token_size(
             communities_data,
             query_param.global_max_token_for_community_report,
             tiktoken_model,
             key=lambda x: x["report_string"]
         )
+        if not this_group:
+            # 单条报告超过 token 预算，强制纳入以避免死循环
+            this_group = communities_data[:1]
         community_groups.append(this_group)
-        communities_data = communities_data[len(this_group) :]
+        communities_data = communities_data[len(this_group):]
 
     async def _process(community_truncated_datas: List[CommunitySchema]) -> Dict[str, Any]:
         communities_section_list = [["id", "content", "rating", "importance"]]
         for i, c in enumerate(community_truncated_datas):
+            report_json = c.get("report_json")
+            rating = report_json.get("rating", 0) if isinstance(report_json, dict) else 0
             communities_section_list.append(
                 [
                     i,
-                    c["report_string"],
-                    c["report_json"].get("rating", 0),
-                    c["occurrence"],
+                    c.get("report_string", ""),
+                    rating,
+                    c.get("occurrence", 0),
                 ]
             )
         community_context = list_of_list_to_csv(communities_section_list)
@@ -127,16 +131,21 @@ async def global_query(
         reverse=True,
     )
     sorted_community_schemas = sorted_community_schemas[
-        : query_param.global_max_consider_community
+        : int(query_param.global_max_consider_community)
     ]
     community_datas = await community_reports.get_by_ids(
         [k[0] for k in sorted_community_schemas]
     )
     community_datas = [c for c in community_datas if c is not None]
+
+    def _safe_rating(c: dict) -> float:
+        rj = c.get("report_json")
+        return rj.get("rating", 0) if isinstance(rj, dict) else 0
+
     community_datas_filtered = [
         c
         for c in community_datas
-        if c["report_json"].get("rating", 0) >= query_param.global_min_community_rating
+        if _safe_rating(c) >= query_param.global_min_community_rating
     ]
     # Fallback: if strict rating filter removes all communities, use all available ones
     # rather than returning an empty failure response. This prevents the global mode
@@ -148,13 +157,13 @@ async def global_query(
         )
         community_datas_filtered = sorted(
             community_datas,
-            key=lambda x: x["report_json"].get("rating", 0),
+            key=_safe_rating,
             reverse=True,
         )[:min(len(community_datas), 10)]
     community_datas = community_datas_filtered
     community_datas = sorted(
         community_datas,
-        key=lambda x: (x["occurrence"], x["report_json"].get("rating", 0)),
+        key=lambda x: (x.get("occurrence", 0), _safe_rating(x)),
         reverse=True,
     )
     logger.info(f"Retrieved {len(community_datas)} communities")

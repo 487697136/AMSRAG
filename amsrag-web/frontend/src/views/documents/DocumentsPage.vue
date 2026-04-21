@@ -103,9 +103,9 @@
 <script setup>
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { NButton, NDataTable, NDrawer, NDrawerContent, NModal, NSpace, NInput, NSelect, NSpin, useMessage } from 'naive-ui'
+import { NButton, NDataTable, NDrawer, NDrawerContent, NModal, NProgress, NSpace, NInput, NSelect, NSpin, useMessage } from 'naive-ui'
 import { EyeOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
-import { deleteDocument, listDocumentsByKnowledgeBase, reprocessDocument, uploadDocument } from '@/api/zhiyuan'
+import { deleteDocument, getDocumentProgress, listDocumentsByKnowledgeBase, reprocessDocument, uploadDocument } from '@/api/zhiyuan'
 import AppEmpty from '@/components/common/AppEmpty.vue'
 import DetailPanel from '@/components/common/DetailPanel.vue'
 import FilterToolbar from '@/components/common/FilterToolbar.vue'
@@ -133,6 +133,7 @@ const showDeleteConfirm = ref(false)
 const pendingDeleteDoc = ref(null)
 const selectedDocumentId = ref('')
 let pollTimer = null
+let progressPollTimer = null
 
 const knowledgeBaseFilterOptions = computed(() => [
   { label: '全部知识库', value: 'all' },
@@ -199,10 +200,45 @@ async function loadDocuments() {
   }
 }
 
+async function pollProcessingProgress() {
+  const processingDocs = documentRecordList.value.filter((item) =>
+    ['processing', 'pending'].includes(item.status)
+  )
+  if (!processingDocs.length) return
+  await Promise.allSettled(
+    processingDocs.map(async (doc) => {
+      try {
+        const prog = await getDocumentProgress(doc.id)
+        const target = documentRecordList.value.find((d) => d.id === doc.id)
+        if (!target) return
+        target.progress = prog.progress ?? 0
+        target.progress_stage = prog.progress_stage ?? ''
+        if (prog.status !== target.status) {
+          target.status = prog.status
+          target.error_message = prog.error_message
+          if (['completed', 'failed'].includes(prog.status)) {
+            // 状态终止时触发一次完整刷新以获取 chunk_count 等字段
+            await loadDocuments()
+          }
+        }
+      } catch (_e) {
+        // 静默忽略单个文档进度查询失败
+      }
+    })
+  )
+}
+
 function ensurePolling() {
   if (pollTimer) clearInterval(pollTimer)
-  if (!documentRecordList.value.some((item) => ['processing', 'pending'].includes(item.status))) return
-  pollTimer = window.setInterval(() => { loadDocuments() }, 5000)
+  if (progressPollTimer) clearInterval(progressPollTimer)
+  const hasProcessing = documentRecordList.value.some((item) =>
+    ['processing', 'pending'].includes(item.status)
+  )
+  if (!hasProcessing) return
+  // 每 2 秒快速轮询进度（轻量端点）
+  progressPollTimer = window.setInterval(pollProcessingProgress, 2000)
+  // 每 10 秒做一次全量刷新，确保数据最终一致
+  pollTimer = window.setInterval(() => { loadDocuments() }, 10000)
 }
 
 function handleUploadDocument() {
@@ -272,15 +308,42 @@ async function handleDeleteDocument() {
 }
 
 const documentTableColumns = computed(() => [
-  { title: '文档名称', key: 'name', minWidth: 260, ellipsis: { tooltip: true } },
-  { title: '知识库', key: 'kbName', minWidth: 140 },
-  { title: '类型', key: 'file_type', width: 90 },
-  { title: '大小', key: 'file_size', width: 110, render: (row) => formatBytes(row.file_size) },
-  { title: '状态', key: 'status', width: 120, render: (row) => h('span', { class: ['status-badge', `status-badge--${statusToneFromDocument(row.status)}`] }, formatDocumentStatus(row.status)) },
-  { title: '切块', key: 'chunk_count', width: 80 },
-  { title: '更新时间', key: 'updated_at', width: 160, render: (row) => formatDateTime(row.updated_at) },
+  { title: '文档名称', key: 'name', minWidth: 240, ellipsis: { tooltip: true } },
+  { title: '知识库', key: 'kbName', minWidth: 120 },
+  { title: '类型', key: 'file_type', width: 80 },
+  { title: '大小', key: 'file_size', width: 100, render: (row) => formatBytes(row.file_size) },
   {
-    title: '操作', key: 'actions', width: 150,
+    title: '状态 / 进度', key: 'status', minWidth: 180,
+    render: (row) => {
+      const isProcessing = ['processing', 'pending'].includes(row.status)
+      const badge = h('span', {
+        class: ['status-badge', `status-badge--${statusToneFromDocument(row.status)}`]
+      }, formatDocumentStatus(row.status))
+      if (!isProcessing) return badge
+      const pct = row.progress ?? 0
+      const stage = row.progress_stage || '处理中...'
+      return h('div', { class: 'progress-cell' }, [
+        h('div', { class: 'progress-cell__header' }, [
+          badge,
+          h('span', { class: 'progress-cell__pct' }, `${pct}%`)
+        ]),
+        h(NProgress, {
+          percentage: pct,
+          height: 4,
+          borderRadius: 2,
+          indicatorPlacement: 'inside',
+          showIndicator: false,
+          status: pct === 100 ? 'success' : 'default',
+          style: 'margin-top:4px'
+        }),
+        h('span', { class: 'progress-cell__stage' }, stage)
+      ])
+    }
+  },
+  { title: '切块', key: 'chunk_count', width: 72 },
+  { title: '更新时间', key: 'updated_at', width: 150, render: (row) => formatDateTime(row.updated_at) },
+  {
+    title: '操作', key: 'actions', width: 140,
     render: (row) => h(NSpace, { size: 6 }, { default: () => [
       h(NButton, { text: true, onClick: () => openDocumentDetail(row.id) }, { icon: () => h(EyeOutline) }),
       row.status === 'failed' ? h(NButton, { text: true, type: 'primary', onClick: () => handleReprocessDocument(row.id) }, { icon: () => h(RefreshOutline) }) : null,
@@ -291,7 +354,10 @@ const documentTableColumns = computed(() => [
 
 watch(documentRecordList, ensurePolling, { deep: true })
 onMounted(loadDocuments)
-onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
+onBeforeUnmount(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  if (progressPollTimer) clearInterval(progressPollTimer)
+})
 </script>
 
 <style scoped>
@@ -318,4 +384,9 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
 .delete-warn-box__icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
 .delete-warn-box__title { font-size: 13px; font-weight: 700; color: #92400e; margin-bottom: 4px; }
 .delete-warn-box__desc { font-size: 12px; color: #78350f; line-height: 1.6; }
+
+.progress-cell { display: flex; flex-direction: column; gap: 2px; min-width: 160px; }
+.progress-cell__header { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.progress-cell__pct { font-size: 11px; font-weight: 600; color: var(--brand-600); white-space: nowrap; }
+.progress-cell__stage { font-size: 11px; color: var(--text-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>

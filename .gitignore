@@ -1,11 +1,15 @@
 # =============================================================================
-# 仓库范围：仅将根目录 LICENSE、amsrag/、amsrag-web/、本文件纳入版本控制；
-# 根目录下其余文件/文件夹（如 README、docs、examples、experiments 等）一律忽略。
+# 仓库范围：根目录 LICENSE、README、ARCHITECTURE、docs/、amsrag/、amsrag-web/、本文件；
+# 其余根目录项（如 requirements.txt、examples、experiments 等）仍忽略。
 # 使用方式：在仓库根目录执行 git add . 时只会添加上述路径（仍受下方规则约束）。
 # =============================================================================
 /*
 !LICENSE
 !.gitignore
+!README.md
+!ARCHITECTURE.md
+!docs/
+!docs/**
 !amsrag/
 !amsrag/**
 !amsrag-web/

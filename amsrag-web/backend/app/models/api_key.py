@@ -28,6 +28,10 @@ class APIKey(Base):
     
     # 密钥描述
     description = Column(String(255))
+
+    # 嵌入模型名称（仅对 embedding 类型的 provider 有效）
+    # 例：BAAI/bge-m3 或 Pro/BAAI/bge-m3
+    model_name = Column(String(100))
     
     # 时间戳
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -184,27 +184,26 @@ async def generate_community_report(
             
             logger.info(f"处理级别 {level} 的社区批次 {i//batch_size + 1}/{(len(this_level_community_keys) + batch_size - 1)//batch_size}")
             
-            # 处理当前批次
+            # 处理当前批次（return_exceptions=True 避免单条失败导致整批丢失）
             batch_reports = await asyncio.gather(
                 *[
                     _form_single_community_report(c, community_datas)
                     for c in batch_values
-                ]
+                ],
+                return_exceptions=True,
             )
-            
-            # 更新社区数据
-            batch_data = {
-                k: {
+
+            # 更新社区数据，跳过失败的条目
+            batch_data = {}
+            for k, r, v in zip(batch_keys, batch_reports, batch_values):
+                if isinstance(r, BaseException):
+                    logger.warning(f"Community report generation failed for key={k}: {r}")
+                    continue
+                batch_data[k] = {
                     "report_string": _community_report_json_to_str(r),
                     "report_json": r,
                     **v,
                 }
-                for k, r, v in zip(
-                    batch_keys,
-                    batch_reports,
-                    batch_values,
-                )
-            }
             community_datas.update(batch_data)
             
             # 每批次处理完成后保存一次数据

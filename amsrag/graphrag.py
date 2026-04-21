@@ -181,7 +181,10 @@ class EnhancedGraphRAG:
     # 娣峰悎妫€绱?璺敱锛堜笌 Hybrid 鎵╁睍鍏煎鐨勫崰浣嶅睘鎬э級
     router_cls: type = ComplexityAwareRouter  # 渚涙墿灞曠被妫€鏌?
     router_kwargs: dict = field(default_factory=dict)  # 渚涙墿灞曠被澶嶅埗骞惰鐩?
-    model_path: str = field(default_factory=lambda: "amsrag/models/modernbert_complexity_classifier_standard")
+    model_path: str = field(default_factory=lambda: os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "models", "modernbert_complexity_classifier_standard"
+    ))
 
     def __post_init__(self):
 
@@ -467,7 +470,7 @@ class EnhancedGraphRAG:
             # 绗簩闃舵锛氭笎杩涘紡妫€绱㈢瓥鐣ユ墽琛?
             # 娑堣瀺瀹為獙锛氭牴鎹紑鍏冲喅瀹氫娇鐢ㄨ嚜閫傚簲璺敱杩樻槸鍥哄畾璺敱
             if self.ablation_routing_adaptive:
-                retrieval_tasks = self._plan_retrieval_tasks(complexity_result, param)
+                retrieval_tasks = self._plan_retrieval_tasks(complexity_result, param, query=query)
                 logger.info(f"浣跨敤鑷€傚簲璺敱锛岀瓥鐣? {retrieval_tasks}")
             else:
                 retrieval_tasks = self._plan_fixed_retrieval_tasks(param)
@@ -506,9 +509,35 @@ class EnhancedGraphRAG:
                 mode: (len(result) if isinstance(result, list) else int(bool(result)))
                 for mode, result in retrieval_results.items()
             }
+            # Global fallback: if every retriever returned nothing and local graph is
+            # enabled, try global (community-report) retrieval as a last resort.
+            _all_empty = all(
+                (not r) or (isinstance(r, list) and len(r) == 0)
+                or (isinstance(r, dict) and len(r) == 0)
+                for r in retrieval_results.values()
+            )
+            if _all_empty and "global" not in retrieval_tasks and self.enable_local:
+                logger.warning(
+                    "All retrievers returned empty results - "
+                    "falling back to global (community-report) retrieval"
+                )
+                try:
+                    _fb_result = await self._execute_retrieval_tasks(
+                        ["global"], query, param, complexity_result
+                    )
+                    if _fb_result.get("global"):
+                        retrieval_results = _fb_result
+                        retrieval_tasks = ["global"]
+                        retrieval_summary["planned_modes"] = ["global"]
+                        logger.info("Global fallback retrieval succeeded")
+                except Exception as _fb_exc:
+                    logger.error("Global fallback retrieval failed: %s", _fb_exc)
             
             # 绗笁闃舵锛氭櫤鑳借瀺鍚堬紙鍖呭惈LLM鐢熸垚锛?
             start_llm = time.time()
+            # Defensive init: prevent UnboundLocalError if no retrieval branch assigns response
+            from .answer_generation.prompts import PROMPTS as _PROMPTS_GUARD
+            response = _PROMPTS_GUARD["fail_response"]
             if len(retrieval_results) == 1:
                 # 鍗曚竴妫€绱㈢粨鏋滐紝鐩存帴澶勭悊
                 mode, result = next(iter(retrieval_results.items()))
@@ -680,59 +709,76 @@ class EnhancedGraphRAG:
         return f"{normalized[: max(limit - 3, 0)].rstrip()}..."
     
     async def _convert_retrieval_results_to_response(self, retrieval_results, query: str, param: QueryParam) -> str:
-        """
-        灏嗘绱㈢粨鏋滆浆鎹负鏈€缁堝搷搴?
-        
-        Args:
-            retrieval_results: RetrievalResult鍒楄〃鎴栦笂涓嬫枃瀛楃涓?
-            query: 鏌ヨ鏂囨湰
-            param: 鏌ヨ鍙傛暟
-            
-        Returns:
-            鏈€缁堢殑鍝嶅簲瀛楃涓?
-        """
+        """将检索结果转换为最终响应"""
         try:
             from .retrieval.alignment import RetrievalResult
-            
+
+            logger.info(
+                f"[convert] type={type(retrieval_results).__name__}, "
+                f"len={len(retrieval_results) if isinstance(retrieval_results, (list, dict)) else 'n/a'}"
+            )
+
             if isinstance(retrieval_results, str):
-                # 宸茬粡鏄瓧绗︿覆鏍煎紡鐨勪笂涓嬫枃锛岀洿鎺ヨ繑鍥?
                 return retrieval_results
             elif isinstance(retrieval_results, list) and retrieval_results:
-                # RetrievalResult鍒楄〃锛岄渶瑕佽浆鎹?
-                if isinstance(retrieval_results[0], RetrievalResult):
-                    # 鎻愬彇鍐呭骞剁敓鎴愬洖绛?
-                    context_parts = [result.content for result in retrieval_results if result.content]
+                first = retrieval_results[0]
+                is_rr = isinstance(first, RetrievalResult)
+                logger.info(f"[convert] first item type={type(first).__name__}, is_RetrievalResult={is_rr}")
+                if is_rr:
+                    context_parts = [r.content for r in retrieval_results if r.content]
+                    logger.info(
+                        f"[convert] context_parts={len(context_parts)} / {len(retrieval_results)}"
+                    )
                     if not context_parts:
+                        logger.warning("[convert] context_parts 为空，直接返回 fail_response（未调用 LLM）")
                         from .answer_generation.prompts import PROMPTS
                         return PROMPTS["fail_response"]
-                    
+
                     context = "\n\n".join(context_parts)
-                    
-                    # 浣跨敤LLM鐢熸垚鏈€缁堝洖绛?
                     from .answer_generation.prompts import PROMPTS
-                    sys_prompt_temp = PROMPTS.get("naive_rag_response", "Please answer based on the context: {content_data}")
-                    sys_prompt = sys_prompt_temp.format(
-                        content_data=context, 
-                        response_type=param.response_type
+                    sys_prompt_temp = PROMPTS.get(
+                        "naive_rag_response",
+                        "Please answer based on the context: {content_data}",
                     )
-                    
+                    # 使用 replace 而非 format，避免 content 中含有 {} 导致格式化异常
+                    sys_prompt = sys_prompt_temp.replace("{content_data}", context).replace(
+                        "{response_type}", str(param.response_type or "多段落回答（中文）")
+                    )
+
+                    logger.info(
+                        f"[convert] 调用 best_model_func, stream_callback={self.answer_stream_callback is not None}"
+                    )
                     response = await self.best_model_func(
                         query,
                         system_prompt=sys_prompt,
+                        stream_callback=self.answer_stream_callback,
                     )
+                    logger.info(
+                        f"[convert] LLM 返回: type={type(response).__name__}, "
+                        f"len={len(response) if isinstance(response, str) else 'n/a'}, "
+                        f"preview={repr(response[:80]) if isinstance(response, str) else response}"
+                    )
+                    if not response or (isinstance(response, str) and not response.strip()):
+                        logger.warning("[convert] LLM 返回空响应，降级为 fail_response")
+                        return PROMPTS["fail_response"]
                     return response
                 else:
-                    # 鏈煡鏍煎紡锛岃浆涓哄瓧绗︿覆
-                    return str(retrieval_results[0]) if retrieval_results else ""
+                    logger.warning(
+                        f"[convert] 第一项不是 RetrievalResult 而是 {type(first).__name__}，转为字符串"
+                    )
+                    return str(first)
             else:
-                # 绌虹粨鏋?
+                logger.warning(
+                    f"[convert] retrieval_results 为空列表或非列表: {type(retrieval_results).__name__}，返回 fail_response"
+                )
                 from .answer_generation.prompts import PROMPTS
                 return PROMPTS["fail_response"]
-                
+
         except Exception as e:
-            logger.error(f"缁撴灉杞崲澶辫触: {e}")
+            logger.error(f"[convert] 结果转换失败: {type(e).__name__}: {e}", exc_info=True)
             from .answer_generation.prompts import PROMPTS
             return PROMPTS["fail_response"]
+
     
     async def _fallback_single_mode_query(self, query: str, param: QueryParam) -> str:
         """
@@ -787,9 +833,23 @@ class EnhancedGraphRAG:
             from .answer_generation.prompts import PROMPTS
             return PROMPTS["fail_response"]
 
-    async def ainsert(self, string_or_strings):
+    async def ainsert(self, string_or_strings, progress_callback=None):
         """寮傛鎻掑叆鎺ュ彛"""
+        import inspect as _inspect
+
+        async def _report(pct: int, stage: str) -> None:
+            if progress_callback is None:
+                return
+            try:
+                if _inspect.iscoroutinefunction(progress_callback):
+                    await progress_callback(pct, stage)
+                else:
+                    progress_callback(pct, stage)
+            except Exception as _cb_err:
+                logger.warning(f"progress_callback raised: {_cb_err}")
+
         await self._insert_start()
+        await _report(5, "初始化")
         try:
             if isinstance(string_or_strings, str):
                 string_or_strings = [string_or_strings]
@@ -826,6 +886,7 @@ class EnhancedGraphRAG:
                 logger.warning("All chunks are already in the storage")
                 return
             logger.info(f"[New Chunks] inserting {len(inserting_chunks)} chunks")
+            await _report(10, "文本分块")
             
             if self.enable_naive_rag:
                 logger.info("Insert chunks for naive RAG")
@@ -844,9 +905,8 @@ class EnhancedGraphRAG:
                     logger.warning(f"BM25 indexing failed: {e}")
 
             # 娓呯悊绀惧尯鎶ュ憡锛堥渶瑕侀噸鏂扮敓鎴愶級
-            await self.community_reports.drop()
-
             # 瀹炰綋鎻愬彇鍜屽浘鏋勫缓
+            await _report(35, "实体抽取")
             logger.info("[Entity Extraction]...")
             maybe_new_kg = await self.entity_extraction_func(
                 inserting_chunks,
@@ -860,22 +920,234 @@ class EnhancedGraphRAG:
                 logger.warning("No new entities found")
                 return
             self.chunk_entity_relation_graph = maybe_new_kg
+            await self.community_reports.drop()
+            await _report(65, "实体抽取完成")
 
             # 鍥捐仛绫诲拰绀惧尯鎶ュ憡鐢熸垚
+            await _report(70, "图谱聚类")
             logger.info("[Community Report]...")
             await self.chunk_entity_relation_graph.clustering(
                 self.graph_cluster_algorithm
             )
+            await _report(75, "社区报告生成")
             await generate_community_report(
                 self.community_reports, self.chunk_entity_relation_graph, asdict(self)
             )
 
             # 鎻愪氦鏇存柊
+            await _report(90, "索引提交")
             await self.full_docs.upsert(new_docs)
             await self.text_chunks.upsert(inserting_chunks)
+            await _report(100, "处理完成")
             
         finally:
             await self._insert_done()
+
+
+    async def rebuild_vector_index_only(self, progress_callback=None) -> dict:
+        """
+        仅重建向量索引\uff08FAISS\uff09和 BM25 索引\uff0c不重新运行实体抽取和图谱构建\u3002
+
+        \u9002\u7528\u573a\u666f\uff1a\u5411\u91cf\u7d22\u5f15\u88ab\u968f\u673a\u5411\u91cf\u6c61\u67d3\uff08Embedding API \u6545\u969c\uff09\u65f6\u5feb\u901f\u4fee\u590d\u3002
+        \u77e5\u8bc6\u56fe\u8c31\u3001\u793e\u533a\u62a5\u544a\u3001\u5b9e\u4f53\u7d22\u5f15\u5747\u4fdd\u6301\u4e0d\u53d8\u3002
+        """
+        import inspect as _inspect
+
+        async def _report(pct: int, stage: str) -> None:
+            if progress_callback is None:
+                return
+            try:
+                if _inspect.iscoroutinefunction(progress_callback):
+                    await progress_callback(pct, stage)
+                else:
+                    progress_callback(pct, stage)
+            except Exception as _cb_err:
+                logger.warning(f"progress_callback raised: {_cb_err}")
+
+        await _report(5, "\u52a0\u8f7d\u5206\u5757\u6570\u636e")
+
+        # 1. \u4ece\u5df2\u6709\u7684 text_chunks KV \u5b58\u50a8\u4e2d\u52a0\u8f7d\u5168\u90e8\u5206\u5757
+        all_chunk_ids = await self.text_chunks.all_keys()
+        if not all_chunk_ids:
+            logger.warning("text_chunks \u4e3a\u7a7a\uff0c\u65e0\u6cd5\u91cd\u5efa\u5411\u91cf\u7d22\u5f15\uff0c\u8bf7\u5148\u5b8c\u6574\u5efa\u5e93\u3002")
+            return {"error": "no_chunks", "chunks_reindexed": 0, "bm25_reindexed": 0}
+
+        all_chunks_raw = await self.text_chunks.get_by_ids(all_chunk_ids)
+        chunks_data = {}
+        for chunk_id, chunk in zip(all_chunk_ids, all_chunks_raw):
+            if chunk and isinstance(chunk, dict) and isinstance(chunk.get("content"), str) and chunk["content"].strip():
+                chunks_data[chunk_id] = chunk
+
+        if not chunks_data:
+            logger.warning("\u672a\u627e\u5230\u6709\u6548 chunk\uff0c\u8bf7\u68c0\u67e5 text_chunks \u5185\u5bb9\u3002")
+            return {"error": "no_valid_chunks", "chunks_reindexed": 0, "bm25_reindexed": 0}
+
+        logger.info(f"\u51c6\u5907\u91cd\u5efa\u5411\u91cf\u7d22\u5f15\uff0c\u5171 {len(chunks_data)} \u4e2a chunks")
+        await _report(15, f"\u51c6\u5907\u5d4c\u5165 {len(chunks_data)} \u4e2a chunks")
+
+        # 2. \u91cd\u5efa FAISS \u7d22\u5f15
+        faiss_reindexed = 0
+        if self.enable_naive_rag and hasattr(self, "chunks_vdb") and self.chunks_vdb is not None:
+            try:
+                # \u6e05\u7a7a\u65e7\u7d22\u5f15
+                self.chunks_vdb._create_new_index()
+                logger.info("FAISS \u65e7\u7d22\u5f15\u5df2\u6e05\u7a7a\uff0c\u5f00\u59cb\u91cd\u65b0\u751f\u6210\u5d4c\u5165\u5411\u91cf...")
+                await _report(20, "\u751f\u6210 embedding \u5411\u91cf")
+
+                # \u91cd\u65b0\u5d4c\u5165\uff08\u5185\u90e8\u4f1a\u5206\u6279\u8c03\u7528 embedding_func\uff09
+                await self.chunks_vdb.upsert(chunks_data)
+
+                # \u6301\u4e45\u5316\u5230\u78c1\u76d8
+                await self.chunks_vdb.index_done_callback()
+                faiss_reindexed = len(chunks_data)
+                logger.info(f"FAISS \u91cd\u5efa\u5b8c\u6210\uff1a{faiss_reindexed} \u4e2a vectors")
+                await _report(70, "FAISS \u5411\u91cf\u7d22\u5f15\u91cd\u5efa\u5b8c\u6210")
+            except Exception as e:
+                logger.error(f"FAISS \u91cd\u5efa\u5931\u8d25: {e}")
+                return {"error": str(e), "chunks_reindexed": 0, "bm25_reindexed": 0}
+        else:
+            logger.info("\u6587\u6863\u68c0\u7d22\uff08naive RAG\uff09\u672a\u542f\u7528\uff0c\u8df3\u8fc7 FAISS \u91cd\u5efa")
+            await _report(70, "\u8df3\u8fc7 FAISS\uff08\u672a\u542f\u7528\uff09")
+
+        # 3. \u91cd\u5efa BM25 \u7d22\u5f15
+        bm25_reindexed = 0
+        if self.enable_bm25 and hasattr(self, "bm25_storage") and self.bm25_storage is not None:
+            try:
+                # \u6e05\u7a7a\u65e7\u7d22\u5f15
+                self.bm25_storage._index = {}
+                self.bm25_storage._doc_lengths = {}
+                self.bm25_storage._documents = {}
+                self.bm25_storage._avg_doc_length = 0
+                self.bm25_storage._initialized = False
+
+                bm25_docs = {k: v.get("content", "") for k, v in chunks_data.items()}
+                bm25_docs = {k: c for k, c in bm25_docs.items() if isinstance(c, str) and c.strip()}
+                if bm25_docs:
+                    logger.info(f"\u91cd\u5efa BM25 \u7d22\u5f15\uff0c\u5171 {len(bm25_docs)} \u4e2a docs")
+                    await _report(80, "\u91cd\u5efa BM25 \u5173\u952e\u8bcd\u7d22\u5f15")
+                    await self.bm25_storage.index_documents(bm25_docs)
+                    bm25_reindexed = len(bm25_docs)
+                    logger.info(f"BM25 \u91cd\u5efa\u5b8c\u6210\uff1a{bm25_reindexed} \u4e2a docs")
+            except Exception as e:
+                logger.warning(f"BM25 \u91cd\u5efa\u5931\u8d25\uff08\u4e0d\u5f71\u54cd FAISS\uff09: {e}")
+        else:
+            logger.info("\u5173\u952e\u8bcd\u68c0\u7d22\uff08BM25\uff09\u672a\u542f\u7528\uff0c\u8df3\u8fc7")
+
+        await _report(100, "\u5411\u91cf\u7d22\u5f15\u91cd\u5efa\u5b8c\u6210")
+        return {
+            "chunks_reindexed": faiss_reindexed,
+            "bm25_reindexed": bm25_reindexed,
+            "total_chunks": len(chunks_data),
+        }
+
+
+    async def rebuild_graph_only(self, progress_callback=None) -> dict:
+        """
+        \u4ec5\u91cd\u5efa\u77e5\u8bc6\u56fe\u8c31\uff08\u5b9e\u4f53\u62bd\u53d6\u3001\u805a\u7c7b\u548c\u793e\u533a\u62a5\u544a\uff09\uff0c\u4fdd\u7559\u73b0\u6709\u7684 FAISS \u548c BM25 \u7d22\u5f15\u3002
+        \u9002\u7528\u573a\u666f\uff1a\u9700\u8981\u66f4\u65b0\u5b9e\u4f53\u62bd\u53d6\u903b\u8f91\u6216\u793e\u533a\u62a5\u544a\uff0c\u4f46\u5411\u91cf\u7d22\u5f15\u5df2\u6b63\u5e38\u3002
+        """
+        import inspect as _inspect
+
+        async def _report(pct: int, stage: str) -> None:
+            if progress_callback is None:
+                return
+            try:
+                if _inspect.iscoroutinefunction(progress_callback):
+                    await progress_callback(pct, stage)
+                else:
+                    progress_callback(pct, stage)
+            except Exception as _cb_err:
+                logger.warning(f"progress_callback raised: {_cb_err}")
+
+        await _report(5, "\u52a0\u8f7d\u5206\u5757\u6570\u636e")
+
+        # 1. \u4ece\u5df2\u6709\u7684 text_chunks \u52a0\u8f7d\u5168\u90e8 chunks
+        all_chunk_ids = await self.text_chunks.all_keys()
+        if not all_chunk_ids:
+            logger.warning("text_chunks \u4e3a\u7a7a\uff0c\u8bf7\u5148\u5b8c\u6574\u5efa\u5e93")
+            return {"error": "no_chunks"}
+
+        all_chunks_raw = await self.text_chunks.get_by_ids(all_chunk_ids)
+        chunks_data = {}
+        for chunk_id, chunk in zip(all_chunk_ids, all_chunks_raw):
+            if chunk and isinstance(chunk, dict) and isinstance(chunk.get("content"), str) and chunk["content"].strip():
+                chunks_data[chunk_id] = chunk
+
+        if not chunks_data:
+            return {"error": "no_valid_chunks"}
+
+        logger.info(f"\u51c6\u5907\u91cd\u5efa\u77e5\u8bc6\u56fe\u8c31\uff0c\u5171 {len(chunks_data)} \u4e2a chunks")
+        await _report(10, f"\u51c6\u5907\u5206\u6790 {len(chunks_data)} \u4e2a chunks")
+
+        # 2. \u6e05\u7a7a\u793e\u533a\u62a5\u544a
+        await self.community_reports.drop()
+        await _report(15, "\u6e05\u7a7a\u793e\u533a\u62a5\u544a")
+
+        # 3. \u6e05\u7a7a\u5b9e\u4f53\u5411\u91cf\u7d22\u5f15\uff08\u4f1a\u88ab\u5b9e\u4f53\u62bd\u53d6\u91cd\u5efa\uff09
+        if hasattr(self, "entities_vdb") and self.entities_vdb is not None and hasattr(self.entities_vdb, "_create_new_index"):
+            self.entities_vdb._create_new_index()
+            logger.info("\u5b9e\u4f53\u5411\u91cf\u7d22\u5f15\u5df2\u6e05\u7a7a")
+
+        # 4. \u6e05\u7a7a\u77e5\u8bc6\u56fe\u8c31
+        import networkx as _nx
+        if hasattr(self.chunk_entity_relation_graph, "_graph"):
+            self.chunk_entity_relation_graph._graph = _nx.Graph()
+            logger.info("\u5185\u5b58\u56fe\u8c31\u5df2\u6e05\u7a7a")
+
+        await _report(20, "\u56fe\u8c31\u5df2\u6e05\u7a7a\uff0c\u5f00\u59cb\u5b9e\u4f53\u62bd\u53d6")
+
+        # 5. \u91cd\u65b0\u8fd0\u884c\u5b9e\u4f53\u62bd\u53d6
+        logger.info("[Graph Rebuild] Entity Extraction...")
+        from dataclasses import asdict
+        try:
+            maybe_new_kg = await self.entity_extraction_func(
+                chunks_data,
+                knwoledge_graph_inst=self.chunk_entity_relation_graph,
+                entity_vdb=self.entities_vdb,
+                global_config=asdict(self),
+                using_amazon_bedrock=self.using_amazon_bedrock,
+            )
+        except Exception as e:
+            logger.error(f"\u5b9e\u4f53\u62bd\u53d6\u5931\u8d25: {e}")
+            return {"error": str(e)}
+
+        if maybe_new_kg is None:
+            logger.warning("\u5b9e\u4f53\u62bd\u53d6\u8fd4\u56de\u7a7a\u56fe\u8c31")
+            return {"error": "entity_extraction_returned_none"}
+
+        self.chunk_entity_relation_graph = maybe_new_kg
+        await _report(65, "\u5b9e\u4f53\u62bd\u53d6\u5b8c\u6210\uff0c\u5f00\u59cb\u56fe\u8c31\u805a\u7c7b")
+
+        # 6. \u91cd\u65b0\u805a\u7c7b\u548c\u793e\u533a\u62a5\u544a
+        logger.info("[Graph Rebuild] Community Clustering...")
+        await self.chunk_entity_relation_graph.clustering(self.graph_cluster_algorithm)
+        await _report(75, "\u805a\u7c7b\u5b8c\u6210\uff0c\u751f\u6210\u793e\u533a\u62a5\u544a")
+
+        logger.info("[Graph Rebuild] Community Reports...")
+        await generate_community_report(
+            self.community_reports, self.chunk_entity_relation_graph, asdict(self)
+        )
+        await _report(90, "\u793e\u533a\u62a5\u544a\u751f\u6210\u5b8c\u6210")
+
+        # 7. \u6301\u4e45\u5316\u56fe\u8c31\u548c\u5b9e\u4f53 VDB
+        if hasattr(self.chunk_entity_relation_graph, "index_done_callback"):
+            await self.chunk_entity_relation_graph.index_done_callback()
+        if hasattr(self, "entities_vdb") and self.entities_vdb is not None:
+            await self.entities_vdb.index_done_callback()
+
+        node_count = 0
+        edge_count = 0
+        if hasattr(self.chunk_entity_relation_graph, "_graph"):
+            node_count = self.chunk_entity_relation_graph._graph.number_of_nodes()
+            edge_count = self.chunk_entity_relation_graph._graph.number_of_edges()
+
+        await _report(100, "\u77e5\u8bc6\u56fe\u8c31\u91cd\u5efa\u5b8c\u6210")
+        logger.info(f"\u56fe\u8c31\u91cd\u5efa\u5b8c\u6210: nodes={node_count}, edges={edge_count}")
+        return {
+            "nodes": node_count,
+            "edges": edge_count,
+            "chunks_used": len(chunks_data),
+        }
 
     async def evaluate_system(self, 
                             questions: List[str],
@@ -1007,7 +1279,7 @@ class EnhancedGraphRAG:
             tasks.append(storage_inst.index_done_callback())
         await asyncio.gather(*tasks)
 
-    def _plan_retrieval_tasks(self, complexity_result: Dict[str, Any], param: QueryParam) -> List[str]:
+    def _plan_retrieval_tasks(self, complexity_result: Dict[str, Any], param: QueryParam, query: str = "") -> List[str]:
         """
         瑙勫垝妫€绱换鍔?- 鍩轰簬澶嶆潅搴﹀拰缃俊搴﹂€夋嫨妫€绱㈢瓥鐣?
         
@@ -1040,7 +1312,7 @@ class EnhancedGraphRAG:
         # 浣跨敤ComplexityRouter瑙勫垝妫€绱换鍔?
         if hasattr(self, 'complexity_router') and self.complexity_router:
             try:
-                retrieval_plan = self.complexity_router.get_retrieval_plan(complexity_result, available_modes)
+                retrieval_plan = self.complexity_router.get_retrieval_plan(complexity_result, available_modes, query=query)
                 logger.info(f"妫€绱㈣鍒? {retrieval_plan}")
                 return retrieval_plan
             except Exception as e:

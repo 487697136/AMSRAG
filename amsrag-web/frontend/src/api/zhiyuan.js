@@ -29,6 +29,18 @@ export async function rebuildKnowledgeBase(kbId) {
   return response.data
 }
 
+/** 仅重建知识图谱（实体抽取 + 社区报告），保留向量索引 */
+export async function rebuildKnowledgeGraph(kbId) {
+  const response = await api.post(`/knowledge-bases/${kbId}/rebuild-graph`)
+  return response.data
+}
+
+/** 仅重建向量索引（FAISS + BM25），保留知识图谱 */
+export async function rebuildVectorIndex(kbId) {
+  const response = await api.post(`/knowledge-bases/${kbId}/rebuild-vectors`)
+  return response.data
+}
+
 export async function cleanupKnowledgeBase(kbId) {
   const response = await api.post(`/knowledge-bases/${kbId}/cleanup`)
   return response.data
@@ -72,6 +84,11 @@ export async function deleteDocument(documentId) {
 
 export async function reprocessDocument(documentId) {
   const response = await api.post(`/documents/${documentId}/reprocess`)
+  return response.data
+}
+
+export async function getDocumentProgress(documentId) {
+  const response = await api.get(`/documents/${documentId}/progress`)
   return response.data
 }
 

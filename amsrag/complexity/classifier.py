@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 @dataclass 
 class ComplexityClassifierConfig:
     """澶嶆潅搴﹀垎绫诲櫒閰嶇疆"""
-    model_path: str = "amsrag/models/modernbert_complexity_classifier_standard"
+    model_path: str = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "models", "modernbert_complexity_classifier_standard"
+    )
     pkl_model_path: str = ""  # PKL妯″瀷璺緞锛屼负绌哄垯鑷姩鎼滅储
     max_length: int = 256
     confidence_threshold: float = 0.7

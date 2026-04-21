@@ -38,6 +38,8 @@ class Document(Base):
     # 处理状态
     status = Column(SQLEnum(DocumentStatus), default=DocumentStatus.PENDING)
     error_message = Column(Text)  # 错误信息
+    progress = Column(Integer, default=0)  # 处理进度 0-100
+    progress_stage = Column(String(100), default="")  # 当前处理阶段描述
     
     # 统计信息
     chunk_count = Column(Integer, default=0)  # 分块数量

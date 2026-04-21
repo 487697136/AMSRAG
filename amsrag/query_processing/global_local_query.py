@@ -20,6 +20,7 @@ from ..base import (
     BaseVectorStorage,
 )
 from .._utils import logger
+from ..answer_generation.prompts import PROMPTS
 from ..retrieval.alignment import RetrievalResult
 from .global_query import global_query
 from .local_query import local_query
@@ -89,7 +90,12 @@ async def global_local_query(
         global_context = ""
 
     rewritten_query = query
-    if isinstance(global_context, str) and global_context.strip():
+    _fail_resp = PROMPTS.get("fail_response", "")
+    if (
+        isinstance(global_context, str)
+        and global_context.strip()
+        and global_context.strip() != _fail_resp.strip()
+    ):
         try:
             rewritten_query = await _rewrite_query_with_global_context(
                 query,

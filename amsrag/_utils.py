@@ -25,6 +25,7 @@ logging.basicConfig(
 
 # 创建日志记录器
 logger = logging.getLogger("amsrag")
+logger.setLevel(logging.DEBUG)
 
 
 # 从重构后的模块导入所有函数

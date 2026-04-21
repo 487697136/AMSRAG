@@ -114,6 +114,122 @@ async def rebuild_knowledge_base(kb_id: int, current_user: User = Depends(get_cu
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to rebuild knowledge base: {exc}") from exc
 
 
+@router.post("/{kb_id}/rebuild-graph")
+async def rebuild_graph_index_only(
+    kb_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    仅重建知识图谱（实体抽取、图聚类、社区报告），保留 FAISS 和 BM25 向量索引。
+    适用于需要更新图谱但向量索引已正常的场景。
+    """
+    kb = _get_owned_kb(db, current_user.id, kb_id)
+    if not kb:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found.")
+    if not kb.is_initialized:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="知识库尚未初始化，请先完整构建后再使用此接口。",
+        )
+
+    llm_provider, llm_api_key, embedding_api_key, embedding_model = get_provider_keys(db, current_user.id)
+    if not llm_provider or not llm_api_key or not embedding_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="缺少必要的密钥：请先配置 LLM 密钥和嵌入密钥。",
+        )
+
+    try:
+        rag_service = await get_initialized_rag_service(
+            user_id=current_user.id,
+            kb_id=kb_id,
+            dashscope_key=llm_api_key,
+            siliconflow_key=embedding_api_key,
+            enable_local=kb.enable_local,
+            enable_naive_rag=kb.enable_naive_rag,
+            enable_bm25=kb.enable_bm25,
+            llm_provider=llm_provider,
+            llm_api_key=llm_api_key,
+            embedding_model=embedding_model,
+        )
+        result = await rag_service.rebuild_graph_index()
+        if result.get("error"):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"知识图谱重建失败: {result['error']}",
+            )
+        return {
+            "message": "知识图谱（实体 + 社区报告）重建成功，向量索引保持不变。",
+            **result,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"知识图谱重建失败: {exc}",
+        ) from exc
+
+
+@router.post("/{kb_id}/rebuild-vectors")
+async def rebuild_vector_index_only(
+    kb_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    仅重建向量索引（FAISS + BM25），不重新运行实体抽取和知识图谱构建。
+    适用于修复因 Embedding API 故障导致的向量污染，速度远快于完整重建。
+    """
+    kb = _get_owned_kb(db, current_user.id, kb_id)
+    if not kb:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found.")
+    if not kb.is_initialized:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="知识库尚未初始化，请先完整构建后再使用此接口。",
+        )
+
+    llm_provider, llm_api_key, embedding_api_key, embedding_model = get_provider_keys(db, current_user.id)
+    if not llm_provider or not llm_api_key or not embedding_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="缺少必要的密钥：请先配置 LLM 密钥和嵌入密钥。",
+        )
+
+    try:
+        rag_service = await get_initialized_rag_service(
+            user_id=current_user.id,
+            kb_id=kb_id,
+            dashscope_key=llm_api_key,
+            siliconflow_key=embedding_api_key,
+            enable_local=kb.enable_local,
+            enable_naive_rag=kb.enable_naive_rag,
+            enable_bm25=kb.enable_bm25,
+            llm_provider=llm_provider,
+            llm_api_key=llm_api_key,
+            embedding_model=embedding_model,
+        )
+        result = await rag_service.rebuild_vector_index()
+        if result.get("error"):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"向量索引重建失败: {result['error']}",
+            )
+        return {
+            "message": "向量索引（FAISS + BM25）重建成功，知识图谱保持不变。",
+            **result,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"向量索引重建失败: {exc}",
+        ) from exc
+
+
 @router.post("/{kb_id}/cleanup")
 async def cleanup_knowledge_base(kb_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     kb = _get_owned_kb(db, current_user.id, kb_id)
@@ -169,7 +285,7 @@ async def get_kb_statistics(kb_id: int, current_user: User = Depends(get_current
     if not kb.is_initialized:
         return base_stats
 
-    llm_provider, llm_api_key, embedding_api_key = get_provider_keys(db, current_user.id)
+    llm_provider, llm_api_key, embedding_api_key, embedding_model = get_provider_keys(db, current_user.id)
     if not llm_provider or not llm_api_key or not embedding_api_key:
         base_stats.update({
             "graph_source": "none",
@@ -190,6 +306,7 @@ async def get_kb_statistics(kb_id: int, current_user: User = Depends(get_current
             enable_bm25=kb.enable_bm25,
             llm_provider=llm_provider,
             llm_api_key=llm_api_key,
+            embedding_model=embedding_model,
         )
         stats = rag_service.get_statistics()
         source_meta = detect_graph_source(current_user.id, kb.id, stats)
@@ -228,7 +345,7 @@ async def get_kb_graph(kb_id: int, node_id: str | None = None, keyword: str | No
             "last_error": None,
         }
 
-    llm_provider, llm_api_key, embedding_api_key = get_provider_keys(db, current_user.id)
+    llm_provider, llm_api_key, embedding_api_key, embedding_model = get_provider_keys(db, current_user.id)
     if not llm_provider or not llm_api_key or not embedding_api_key:
         return {
             "nodes": [],
@@ -251,6 +368,7 @@ async def get_kb_graph(kb_id: int, node_id: str | None = None, keyword: str | No
             enable_bm25=kb.enable_bm25,
             llm_provider=llm_provider,
             llm_api_key=llm_api_key,
+            embedding_model=embedding_model,
         )
         result = await rag_service.get_graph_data(node_id=node_id, keyword=keyword, limit=limit, depth=depth)
         if "source" not in result:

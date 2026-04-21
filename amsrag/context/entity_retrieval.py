@@ -10,6 +10,15 @@ from typing import Dict, Any, List, Set
 from ..base import BaseGraphStorage, BaseVectorStorage, QueryParam
 from .._utils import logger
 
+# ---------- jieba 延迟加载 ----------
+try:
+    import jieba
+    import jieba.posseg as pseg
+    _JIEBA_AVAILABLE = True
+    jieba.setLogLevel("WARNING")  # 静默字典加载日志
+except ImportError:
+    _JIEBA_AVAILABLE = False
+    logger.warning("jieba 未安装，中文关键词提取将降级为 n-gram 模式。建议 pip install jieba")
 
 # 英文停用词列表
 STOP_WORDS = {
@@ -21,27 +30,130 @@ STOP_WORDS = {
     "could", "may", "might", "must", "can", "shall"
 }
 
+# 中文停用词：常见功能词、疑问词、代词等，不携带实体信息
+CHINESE_STOP_WORDS = {
+    "的", "地", "得", "了", "着", "过",
+    "和", "与", "或", "及", "但", "而", "也",
+    "在", "于", "从", "到", "对", "向", "把", "被", "由",
+    "这", "那", "此", "该", "其", "之", "各", "每",
+    "什么", "哪", "谁", "哪里", "哪些", "为何", "怎么", "怎样", "如何",
+    "是", "有", "没有", "不", "都", "就", "才", "又", "再", "已",
+    "我", "你", "他", "她", "它", "我们", "你们", "他们",
+    "请", "请问", "告诉", "分析", "介绍", "说明", "描述", "回答",
+    "一个", "一些", "可以", "能够", "需要", "关于", "根据",
+    "讲", "说", "写", "述", "谈", "论",
+}
 
-def extract_keywords(query: str, min_length: int = 3) -> List[str]:
+# jieba 词性标注中表示实体信息的词性（保留），其余虚词/助词/连词跳过
+_JIEBA_KEEP_FLAGS = {
+    "n",   # 普通名词
+    "nr",  # 人名
+    "ns",  # 地名
+    "nt",  # 机构名
+    "nz",  # 其它专名
+    "v",   # 动词（保留，利于描述性实体匹配）
+    "vn",  # 动名词
+    "an",  # 名形词
+    "i",   # 成语
+    "j",   # 简称缩写
+    "eng", # 英文
+    "x",   # 非汉字串（数字/字母混合）
+}
+
+
+def _get_core_query(query: str) -> str:
     """
-    从查询中提取关键词
-    
+    从记忆增强查询字符串中提取核心当前问题。
+
+    当后端开启记忆功能时，传入的 query 形如：
+        "Conversation context:\\nUser: ...\\nAssistant: ...\\n\\nCurrent question:\\n实际问题"
+    此函数提取 "Current question:" 之后的纯问题部分；若无此标记则原样返回。
+    """
+    for marker in ("Current question:\n", "Current question:"):
+        idx = query.find(marker)
+        if idx != -1:
+            return query[idx + len(marker):].strip()
+    return query
+
+
+def _fallback_chinese_keywords(text: str, min_length: int) -> List[str]:
+    """jieba 不可用时的降级方案：提取连续汉字序列 + 2-4 字滑动窗口。"""
+    seen: set = set()
+    result: List[str] = []
+
+    seqs = re.findall(r'[\u4e00-\u9fff]{' + str(min_length) + r',}', text)
+    for seq in seqs:
+        if seq not in CHINESE_STOP_WORDS and seq not in seen:
+            seen.add(seq)
+            result.append(seq)
+        if len(seq) > 4:
+            n = len(seq)
+            for size in range(2, min(5, n + 1)):
+                for i in range(n - size + 1):
+                    ng = seq[i: i + size]
+                    if ng not in CHINESE_STOP_WORDS and ng not in seen:
+                        seen.add(ng)
+                        result.append(ng)
+    return result
+
+
+def extract_keywords(query: str, min_length: int = 2) -> List[str]:
+    """
+    从查询中提取关键词，支持中英文混合。
+
+    - 中文：优先使用 jieba 词性标注分词，保留名词/人名/地名等有意义词性，
+      过滤助词/连词等停用词；jieba 未安装时降级为 n-gram。
+    - 英文：正则提取字母/数字词（长度 ≥ 3），过滤英文停用词。
+
     Args:
-        query: 查询文本
-        min_length: 最小关键词长度
-        
+        query: 查询文本（应仅为核心问题，不含对话模板头部）
+        min_length: 保留词的最小字符数（中文）
+
     Returns:
-        关键词列表
+        去重后的关键词列表
     """
-    # 转小写
+    seen: set = set()
+    keywords: List[str] = []
+
+    def _add(kw: str) -> None:
+        if kw and kw not in seen:
+            seen.add(kw)
+            keywords.append(kw)
+
+    if _JIEBA_AVAILABLE:
+        try:
+            # 使用词性标注分词，保留有实体意义的词
+            for word, flag in pseg.cut(query):
+                word = word.strip()
+                if not word or len(word) < min_length:
+                    continue
+                if word in CHINESE_STOP_WORDS:
+                    continue
+                # 纯标点/空白跳过
+                if re.fullmatch(r'[\s\W]+', word):
+                    continue
+                # 中文词：按词性过滤
+                if re.search(r'[\u4e00-\u9fff]', word):
+                    if flag in _JIEBA_KEEP_FLAGS or flag.startswith("n"):
+                        _add(word)
+                else:
+                    # 非中文词（英文/数字等）：长度过滤
+                    if len(word) >= 3 and word.lower() not in STOP_WORDS:
+                        _add(word.lower())
+        except Exception as exc:
+            logger.warning("jieba 分词失败，降级到 n-gram: %s", exc)
+            for kw in _fallback_chinese_keywords(query, min_length):
+                _add(kw)
+    else:
+        for kw in _fallback_chinese_keywords(query, min_length):
+            _add(kw)
+
+    # 英文/数字词补充（jieba 可能对纯英文文本拆得不准）
     query_lower = query.lower()
-    
-    # 提取单词（字母和数字）
-    words = re.findall(r'\b[a-zA-Z0-9]{' + str(min_length) + r',}\b', query_lower)
-    
-    # 过滤停用词
-    keywords = [w for w in words if w not in STOP_WORDS]
-    
+    for w in re.findall(r'\b[a-zA-Z0-9]{3,}\b', query_lower):
+        if w not in STOP_WORDS:
+            _add(w)
+
     return keywords
 
 
@@ -65,10 +177,11 @@ def calculate_keyword_match_score(
         return 0.0
     
     if not case_sensitive:
+        # lower() 不影响中文字符，英文大小写规范化即可
         text = text.lower()
         keywords = [k.lower() for k in keywords]
-    
-    # 计算匹配的关键词数量
+
+    # 计算匹配的关键词数量（子串匹配，中英文均适用）
     matches = sum(1 for kw in keywords if kw in text)
     
     # 归一化分数
@@ -100,13 +213,16 @@ async def keyword_match_entities(
     Returns:
         匹配的实体列表，格式与向量检索兼容
     """
-    # 提取关键词
-    keywords = extract_keywords(query)
-    
+    # 从记忆增强查询中提取核心问题，避免把对话模板英文词误作关键词
+    core_query = _get_core_query(query)
+
+    # 提取关键词（中文优先）
+    keywords = extract_keywords(core_query)
+
     if not keywords:
         logger.warning("No keywords extracted from query")
         return []
-    
+
     logger.debug(f"Extracted keywords: {keywords}")
     
     # 获取所有实体节点

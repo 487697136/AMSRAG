@@ -8,6 +8,30 @@
         <n-button type="primary" @click="showCreateModal = true">新建知识库</n-button>
       </template>
     </PageHeader>
+    <!-- 重建确认弹窗 -->
+    <n-modal
+      v-model:show="showRebuildConfirm"
+      preset="dialog"
+      :type="pendingRebuildMode === 'full' ? 'warning' : 'info'"
+      :title="rebuildConfirmTitle"
+      positive-text="确认执行"
+      negative-text="取消"
+      :loading="rebuilding"
+      @positive-click="executeRebuild"
+      @negative-click="showRebuildConfirm = false"
+    >
+      <template #default>
+        <div class="rebuild-confirm-body">
+          <p>{{ rebuildConfirmDesc }}</p>
+          <div class="rebuild-confirm-meta" v-if="pendingRebuildMode === 'full'">
+            <n-icon size="15" color="var(--warning-color)" style="margin-right:4px">
+              <svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+            </n-icon>
+            <span>此操作将清空工作目录并重新处理所有文档，耗时较长。</span>
+          </div>
+        </div>
+      </template>
+    </n-modal>
 
     <div class="knowledge-overview-grid">
       <InfoCard label="知识库总数" :value="kbStore.list.length" caption="当前账号下全部知识库" tone="info" />
@@ -54,15 +78,38 @@
         <DetailPanel v-if="selectedKnowledgeBase" :title="selectedKnowledgeBase.name" :description="selectedKnowledgeBase.description || '暂无描述'" :tabs="detailTabs" :active-tab="activeDetailTab" @update:active-tab="activeDetailTab = $event">
           <template #actions>
             <n-space>
-              <n-button
-                type="primary"
-                secondary
-                :loading="rebuilding"
-                :disabled="rebuilding || cleaning"
-                @click="handleRebuildKnowledgeBase(selectedKnowledgeBase.id)"
-              >
-                {{ rebuilding ? '重建中...' : '重建' }}
-              </n-button>
+              <!-- 分裂式重建按钮：左侧直接触发全量重建，右侧下拉选择具体模式 -->
+              <n-button-group>
+                <n-button
+                  type="primary"
+                  secondary
+                  :loading="rebuilding"
+                  :disabled="rebuilding || cleaning"
+                  @click="confirmRebuild('full')"
+                  style="min-width: 72px"
+                >
+                  {{ rebuilding ? rebuildingLabel : '重建' }}
+                </n-button>
+                <n-dropdown
+                  trigger="click"
+                  placement="bottom-end"
+                  :options="rebuildOptions"
+                  :disabled="rebuilding || cleaning"
+                  @select="confirmRebuild"
+                >
+                  <n-button
+                    type="primary"
+                    secondary
+                    :disabled="rebuilding || cleaning"
+                    style="padding: 0 8px"
+                    aria-label="选择重建模式"
+                  >
+                    <n-icon size="14">
+                      <svg viewBox="0 0 24 24"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+                    </n-icon>
+                  </n-button>
+                </n-dropdown>
+              </n-button-group>
               <n-button
                 secondary
                 :loading="cleaning"
@@ -140,10 +187,10 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { NButton, NDrawer, NDrawerContent, NFormItem, NInput, NModal, NSpace, NSpin, NSwitch, useMessage } from 'naive-ui'
-import { cleanupKnowledgeBase, createKnowledgeBase, deleteKnowledgeBase, rebuildKnowledgeBase } from '@/api/zhiyuan'
+import { NButton, NButtonGroup, NDrawer, NDrawerContent, NDropdown, NFormItem, NIcon, NInput, NModal, NSpace, NSpin, NSwitch, useMessage } from 'naive-ui'
+import { cleanupKnowledgeBase, createKnowledgeBase, deleteKnowledgeBase, rebuildKnowledgeBase, rebuildKnowledgeGraph, rebuildVectorIndex } from '@/api/zhiyuan'
 import AppEmpty from '@/components/common/AppEmpty.vue'
 import DetailPanel from '@/components/common/DetailPanel.vue'
 import FilterToolbar from '@/components/common/FilterToolbar.vue'
@@ -161,6 +208,42 @@ const creating = ref(false)
 const rebuilding = ref(false)
 const cleaning = ref(false)
 const deleting = ref(false)
+
+// 重建模式相关状态
+const showRebuildConfirm = ref(false)
+const pendingRebuildMode = ref('full')   // 'full' | 'graph' | 'vectors'
+const rebuildingLabel = ref('重建中...')
+
+const rebuildOptions = [
+  {
+    key: 'full',
+    label: '完整重建（全部）',
+    icon: () => h('span', { style: 'font-size:14px; margin-right:4px' }, '🔄'),
+  },
+  { type: 'divider', key: 'd1' },
+  {
+    key: 'graph',
+    label: '仅重建知识图谱',
+    icon: () => h('span', { style: 'font-size:14px; margin-right:4px' }, '🕸️'),
+  },
+  {
+    key: 'vectors',
+    label: '仅修复向量索引（快速）',
+    icon: () => h('span', { style: 'font-size:14px; margin-right:4px' }, '⚡'),
+  },
+]
+
+const rebuildConfirmTitle = computed(() => ({
+  full: '完整重建知识库',
+  graph: '重建知识图谱',
+  vectors: '修复向量索引',
+}[pendingRebuildMode.value] || '重建'))
+
+const rebuildConfirmDesc = computed(() => ({
+  full: '将清空整个工作目录，重新运行文档切块、实体抽取、图谱构建和向量索引，耗时较长（通常数十分钟）。',
+  graph: '将重新运行实体抽取、图聚类和社区报告生成，保留现有向量索引（FAISS + BM25）。耗时中等。',
+  vectors: '将重新调用 Embedding API 生成向量，写入新的 FAISS 索引并重建 BM25 索引，保留知识图谱。通常仅需数分钟。',
+}[pendingRebuildMode.value] || ''))
 const searchKeyword = ref('')
 const selectedStatus = ref('all')
 const showDetailDrawer = ref(false)
@@ -244,17 +327,40 @@ async function openDetailDrawer(kb) {
   await loadKnowledgeBaseStats(kb.id)
 }
 
-async function handleRebuildKnowledgeBase(kbId) {
+function confirmRebuild(mode) {
+  pendingRebuildMode.value = mode
+  showRebuildConfirm.value = true
+}
+
+async function executeRebuild() {
+  if (!selectedKnowledgeBase.value) return
+  const kbId = selectedKnowledgeBase.value.id
+  const mode = pendingRebuildMode.value
+  showRebuildConfirm.value = false
   rebuilding.value = true
+
+  const labelMap = { full: '重建中...', graph: '图谱重建中...', vectors: '向量修复中...' }
+  const successMap = { full: '知识库完整重建完成', graph: '知识图谱重建完成', vectors: '向量索引修复完成' }
+  const errorMap = { full: '完整重建失败', graph: '知识图谱重建失败', vectors: '向量索引修复失败' }
+
+  rebuildingLabel.value = labelMap[mode] || '重建中...'
+
   try {
-    await rebuildKnowledgeBase(kbId)
-    message.success('知识库重建完成')
+    if (mode === 'full') {
+      await rebuildKnowledgeBase(kbId)
+    } else if (mode === 'graph') {
+      await rebuildKnowledgeGraph(kbId)
+    } else if (mode === 'vectors') {
+      await rebuildVectorIndex(kbId)
+    }
+    message.success(successMap[mode] || '重建完成')
     kbStore.invalidate(kbId)
     await Promise.all([kbStore.fetchList(true), loadKnowledgeBaseStats(kbId)])
   } catch (error) {
-    message.error(error.response?.data?.detail || '重建知识库失败')
+    message.error(error.response?.data?.detail || errorMap[mode] || '重建失败')
   } finally {
     rebuilding.value = false
+    rebuildingLabel.value = '重建中...'
   }
 }
 
@@ -397,6 +503,32 @@ onMounted(() => kbStore.fetchList())
 
 .detail-meta-item--full {
   grid-column: 1 / -1;
+}
+
+.rebuild-confirm-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rebuild-confirm-body p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-2);
+  line-height: 1.6;
+}
+
+.rebuild-confirm-meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-color);
+  font-size: 13px;
+  color: var(--text-3);
+  line-height: 1.5;
 }
 
 @media (max-width: 1200px) {

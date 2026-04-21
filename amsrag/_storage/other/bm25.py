@@ -72,35 +72,31 @@ class BM25Storage(StorageNameSpace):
     def _init_tokenizer(self):
         """初始化分词器"""
         self.tokenizer_type = "simple"  # 默认简单分词
-        
-        if self.language == "auto" or self.language == "en":
-            # 尝试使用NLTK
+        self.stemmer = None
+        self.stop_words = set()
+
+        # auto 模式：优先 jieba（中文），其次 NLTK（英文）
+        if self.language in ("auto", "zh"):
+            if JIEBA_AVAILABLE:
+                self.tokenizer_type = "jieba"
+                logger.info("BM25: Using jieba tokenizer (supports Chinese and mixed text)")
+                return
+
+        if self.language in ("auto", "en"):
             if NLTK_AVAILABLE:
                 try:
-                    # 尝试加载NLTK数据
                     self.stemmer = PorterStemmer()
                     self.stop_words = set(stopwords.words('english'))
                     self.tokenizer_type = "nltk"
                     logger.info("BM25: Using NLTK tokenizer with stemming")
+                    return
                 except LookupError:
                     logger.warning(
                         "NLTK data not found. Run: "
                         "python -m nltk.downloader punkt stopwords"
                     )
-                    self.stemmer = None
-                    self.stop_words = set()
-            else:
-                logger.info("NLTK not available, using simple tokenizer")
-                self.stemmer = None
-                self.stop_words = set()
-        
-        if self.language == "zh":
-            # 中文分词
-            if JIEBA_AVAILABLE:
-                self.tokenizer_type = "jieba"
-                logger.info("BM25: Using jieba tokenizer for Chinese")
-            else:
-                logger.warning("jieba not available for Chinese, using simple tokenizer")
+
+        logger.info("BM25: Using simple tokenizer")
     
     def _detect_language(self, text: str) -> str:
         """
@@ -149,8 +145,8 @@ class BM25Storage(StorageNameSpace):
         else:
             detected_lang = self.language
         
-        # 中文分词
-        if detected_lang == "zh" and self.tokenizer_type == "jieba":
+        # 中文分词（jieba 可用且检测到中文时均走此分支）
+        if detected_lang == "zh" and JIEBA_AVAILABLE:
             tokens = list(jieba.cut(text.lower()))
             # 过滤空白和标点
             tokens = [t for t in tokens if t.strip() and len(t) > 1]

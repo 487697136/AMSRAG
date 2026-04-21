@@ -13,27 +13,54 @@ from app.models.user import User
 def _ensure_runtime_schema() -> None:
     """Apply lightweight additive schema updates for SQLite deployments."""
     inspector = inspect(engine)
-    if "conversation_turns" not in inspector.get_table_names():
-        return
+    table_names = inspector.get_table_names()
 
-    existing_columns = {
-        column["name"] for column in inspector.get_columns("conversation_turns")
-    }
-    required_columns = {
-        "sources_json": "TEXT",
-        "memory_json": "TEXT",
-    }
-
-    with engine.begin() as connection:
-        for column_name, column_type in required_columns.items():
-            if column_name in existing_columns:
-                continue
-            connection.execute(
-                text(
-                    f"ALTER TABLE conversation_turns ADD COLUMN {column_name} {column_type}"
+    if "conversation_turns" in table_names:
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("conversation_turns")
+        }
+        required_columns = {
+            "sources_json": "TEXT",
+            "memory_json": "TEXT",
+        }
+        with engine.begin() as connection:
+            for column_name, column_type in required_columns.items():
+                if column_name in existing_columns:
+                    continue
+                connection.execute(
+                    text(
+                        f"ALTER TABLE conversation_turns ADD COLUMN {column_name} {column_type}"
+                    )
                 )
-            )
-            logger.info(f"Added runtime column conversation_turns.{column_name}")
+                logger.info(f"Added runtime column conversation_turns.{column_name}")
+
+    if "api_keys" in table_names:
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("api_keys")
+        }
+        if "model_name" not in existing_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE api_keys ADD COLUMN model_name TEXT"))
+            logger.info("Added runtime column api_keys.model_name")
+
+    if "documents" in table_names:
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("documents")
+        }
+        required_doc_columns = {
+            "progress": "INTEGER DEFAULT 0",
+            "progress_stage": "TEXT DEFAULT ''",
+        }
+        with engine.begin() as connection:
+            for column_name, column_def in required_doc_columns.items():
+                if column_name in existing_columns:
+                    continue
+                connection.execute(
+                    text(
+                        f"ALTER TABLE documents ADD COLUMN {column_name} {column_def}"
+                    )
+                )
+                logger.info(f"Added runtime column documents.{column_name}")
 
 
 def init_db(db: Session) -> None:

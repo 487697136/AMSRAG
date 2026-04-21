@@ -23,7 +23,7 @@ async def _find_most_related_edges_from_entities(
     all_edges = []
     seen = set()
     for this_edges in all_related_edges:
-        for edge in this_edges:
+        for edge in (this_edges or []):
             sorted_edge = tuple(sorted(edge))
             if sorted_edge not in seen:
                 seen.add(sorted_edge)
